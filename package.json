@@ -1,6 +1,6 @@
 {
   "name": "queen-bot-v3",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "QueenBot v3 - Advanced Facebook Messenger Bot by Priyanshi Kaur",
   "main": "index.ts",
   "scripts": {
