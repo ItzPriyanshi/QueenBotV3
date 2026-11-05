@@ -20,7 +20,7 @@ function start(message?: string, delay = 0): void {
 <<<<<<< HEAD
 		const runnerArgs = isBun ? ["run", "Queen.ts"] : ["Queen.js"];
 =======
-		const runnerArgs = isBun ? ["run", "Goat.ts"] : ["Goat.js"];
+		const runnerArgs = isBun ? ["run", "Queen.ts"] : ["Queen.js"];
 >>>>>>> 4f1c1c393e36b0ef1cb963a6bae6963a34bff83c
 
 		startedAt = Date.now();
