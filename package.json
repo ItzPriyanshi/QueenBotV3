@@ -1,0 +1,89 @@
+{
+  "name": "queen-bot-v3",
+  "version": "3.0.0",
+  "description": "QueenBot v3 - Advanced Facebook Messenger Bot by Priyanshi Kaur",
+  "main": "index.ts",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun run --watch index.ts",
+    "start:node": "node --import tsx index.ts",
+    "start:js": "node index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ItzPriyanshi/QueenBotV2.git"
+  },
+  "keywords": [
+    "queenbot-v2",
+    "facebook-chat-api",
+    "fca",
+    "messenger-bot",
+    "bunjs",
+    "typescript"
+  ],
+  "author": "Priyanshi Kaur",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ItzPriyanshi/QueenBotV3/issues"
+  },
+  "homepage": "https://github.com/ItzPriyanshi/QueenBotV3#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@distube/ytdl-core": "^5.2.0",
+    "@google/genai": "latest",
+    "axios": "^1.4.0",
+    "bcrypt": "latest",
+    "canvas": "latest",
+    "cheerio": "^1.0.0-rc.12",
+    "child_process": "^1.0.2",
+    "connect-flash": "^0.1.1",
+    "cookie-parser": "^1.4.6",
+    "elysia": "latest",
+    "eta": "^1.12.3",
+    "express": "^4.18.1",
+    "express-fileupload": "^1.4.0",
+    "express-rate-limit": "^6.5.2",
+    "express-session": "^1.17.3",
+    "fca-nx": "latest",
+    "form-data": "^4.0.0",
+    "fs": "^0.0.1-security",
+    "fs-extra": "^11.1.0",
+    "gradient-string": "^2.0.2",
+    "graphql-query-to-json": "^2.0.1",
+    "https": "^1.0.0",
+    "https-proxy-agent": "^5.0.1",
+    "image-size": "^2.0.4",
+    "javascript-obfuscator": "^5.9.0",
+    "lodash": "^4.17.21",
+    "moment-timezone": "^0.5.34",
+    "mongoose": "^6.3.1",
+    "mqtt": "latest",
+    "node-cron": "^3.0.2",
+    "npmlog": "^7.0.0",
+    "ora": "^5.4.1",
+    "passport": "^0.6.0",
+    "passport-local": "^1.0.0",
+    "path": "^0.12.7",
+    "play-dl": "^1.9.7",
+    "qrcode-reader": "^1.0.4",
+    "qs": "^6.11.0",
+    "request": "^2.88.2",
+    "searchitunes": "^2.5.4",
+    "sequelize": "^6.19.0",
+    "socket.io": "^4.5.1",
+    "sqlite3": "^5.0.5",
+    "tinyurl": "^1.1.7",
+    "totp-generator": "^0.0.13",
+    "websocket-stream": "^5.5.2",
+    "yt-search": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "bun-types": "^1.1.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

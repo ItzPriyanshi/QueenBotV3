@@ -1,0 +1,19 @@
+{
+  "destinations": [],
+  "monitoredDomains": [
+    "pastebin.com",
+    "hastebin.com",
+    "ghostbin.co",
+    "pastie.org",
+    "dpaste.com",
+    "paste.debian.net",
+    "paste.ubuntu.com"
+  ],
+  "blacklistedKeywords": [],
+  "whitelistedKeywords": [],
+  "statistics": {
+    "totalAlerts": 0,
+    "domainHits": {},
+    "lastReset": "2026-10-31T09:31:38.703Z"
+  }
+}
