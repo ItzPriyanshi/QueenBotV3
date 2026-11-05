@@ -5,7 +5,7 @@ const axios = require("axios");
 const PriyaPrefix = ["queen", "ai"];
 const historyFile = path.join(__dirname, "ai_history.json");
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || (global as any).config?.geminiApiKey || "AQ.Ab8RN6KWXQUAc1T7YNLWPrC2LSlCUulMRWe1oa0pqyEy5xCEAg";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || (global as any).config?.geminiApiKey || "YOUR_GEMINI_API_KEY";
 const GEMINI_MODEL = "gemini-2.5-flash";
 const MAX_HISTORY_MESSAGES = 20;
 
