@@ -11,18 +11,24 @@ const BACKGROUND_IMAGE_URL = [
 	"013ca0a8b6959c25a5a2934af5dd1ef9.jpg"
 ].join("/");
 const CACHE_DIR = path.join(__dirname, "cache");
-const CACHED_BG_PATH = path.join(CACHE_DIR, "help_liquid_bg_v3.jpg");
+const CACHED_BG_PATH = path.join(CACHE_DIR, "help_bg_v3.jpg");
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 let cachedBgBuffer = null;
 
 const CATEGORY_ICONS = {
 	ai: "🤖",
+	"ai chat": "🤖",
+	"ai-image": "🎨",
 	admin: "🛡️",
+	anime: "🌸",
 	box: "📦",
+	"box chat": "💬",
 	chat: "💬",
 	config: "⚙️",
 	custom: "🧩",
+	contacts: "📇",
+	developer: "💻",
 	economy: "💰",
 	events: "🎉",
 	fun: "🎭",
@@ -47,32 +53,43 @@ const CATEGORY_ICONS = {
 
 function getCategoryIcon(category) {
 	const key = String(category || "other").trim().toLowerCase();
-	return CATEGORY_ICONS[key] || "💠";
+	return CATEGORY_ICONS[key] || "▸";
+}
+
+function formatCategoryTitle(category) {
+	const raw = String(category || "other").trim();
+	if (!raw) return "Other";
+	if (raw.length <= 3 && raw.toLowerCase() === "ai") return "AI";
+	return raw
+		.split(/[\s_-]+/)
+		.filter(Boolean)
+		.map(w => (w.toLowerCase() === "ai" ? "AI" : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()))
+		.join(" ");
 }
 
 function getRoleLabel(role, getLang) {
 	const r = Number(role) || 0;
 	if (typeof getLang === "function") {
 		try {
-			if (r === 0) return getLang("roleText0") || "0 • All Users";
-			if (r === 1) return getLang("roleText1") || "1 • Group Admin";
-			if (r === 2) return getLang("roleText2") || "2 • Bot Admin";
+			if (r === 0) return getLang("roleText0") || "0 (All Users)";
+			if (r === 1) return getLang("roleText1") || "1 (Group Admin)";
+			if (r === 2) return getLang("roleText2") || "2 (Bot Admin)";
 		}
 		catch {
 		}
 	}
-	if (r === 0) return "0 • All Users";
-	if (r === 1) return "1 • Group Admin";
-	if (r === 2) return "2 • Bot Admin";
-	return `${r} • Custom Role`;
+	if (r === 0) return "0 (All Users)";
+	if (r === 1) return "1 (Group Admin)";
+	if (r === 2) return "2 (Bot Admin)";
+	return `${r} (Custom)`;
 }
 
 function getShortRoleBadge(role) {
 	const r = Number(role) || 0;
 	if (r === 0) return "ROLE 0 • PUBLIC";
-	if (r === 1) return "ROLE 1 • GROUP ADMIN";
-	if (r === 2) return "ROLE 2 • BOT ADMIN";
-	return `ROLE ${r} • RESTRICTED`;
+	if (r === 1) return "ROLE 1 • ADMIN";
+	if (r === 2) return "ROLE 2 • OWNER";
+	return `ROLE ${r}`;
 }
 
 function resolveLocalizedField(field, langCode = "en") {
@@ -445,7 +462,7 @@ function drawRoundedRectPath(ctx, x, y, w, h, r) {
 	ctx.closePath();
 }
 
-function fillLiquidGlassPanel(
+function fillGlassPanel(
 	ctx,
 	x,
 	y,
@@ -629,7 +646,7 @@ function drawCrownBadge(ctx, x, y, size) {
 	ctx.restore();
 }
 
-function drawLiquidGlassHelpCard(
+function drawCommandHelpCard(
 	ctx,
 	width,
 	height,
@@ -657,7 +674,7 @@ function drawLiquidGlassHelpCard(
 	ctx.font = "bold 12px sans-serif";
 	ctx.fillStyle = "#7cefff";
 	ctx.textAlign = "center";
-	ctx.fillText("QUEENBOT V3 • MODULE INSPECTOR", 422, 36);
+	ctx.fillText("QUEENBOT V3 • COMMAND INSPECTOR", 422, 36);
 	ctx.restore();
 
 	drawCrownBadge(ctx, 50, 74, 48);
@@ -668,15 +685,15 @@ function drawLiquidGlassHelpCard(
 	ctx.fillStyle = "#ffffff";
 	ctx.shadowColor = "rgba(0, 238, 255, 0.35)";
 	ctx.shadowBlur = 10;
-	ctx.fillText(`COMMAND • ${cmd.name.toUpperCase()}`, 112, 101);
+	ctx.fillText(`QUEENBOT V3 • ${cmd.name.toUpperCase()}`, 112, 101);
 
 	ctx.font = "bold 11.5px sans-serif";
 	ctx.fillStyle = "#00eaff";
 	ctx.shadowBlur = 0;
-	ctx.fillText("LIQUID GLASS COMMAND ARCHITECTURE & RUNTIME TELEMETRY", 112, 121);
+	ctx.fillText("COMMAND TELEMETRY & EXECUTION GUIDE", 112, 121);
 	ctx.restore();
 
-	fillLiquidGlassPanel(
+	fillGlassPanel(
 		ctx,
 		776,
 		76,
@@ -701,7 +718,7 @@ function drawLiquidGlassHelpCard(
 	ctx.textAlign = "left";
 	ctx.font = "bold 12px sans-serif";
 	ctx.fillStyle = "#e8faff";
-	ctx.fillText("MODULE ONLINE", 812, 103);
+	ctx.fillText("SYSTEM ONLINE", 812, 103);
 
 	ctx.fillStyle = "#00e5ff";
 	ctx.fillText(`BUILD: v${cmd.version}`, 934, 103);
@@ -715,17 +732,17 @@ function drawLiquidGlassHelpCard(
 	const leftY = 142;
 	const leftW = 736;
 	const leftH = 478;
-	fillLiquidGlassPanel(ctx, leftX, leftY, leftW, leftH, 18, "rgba(0, 238, 255, 0.32)");
+	fillGlassPanel(ctx, leftX, leftY, leftW, leftH, 18, "rgba(0, 238, 255, 0.32)");
 
 	ctx.save();
 	ctx.textAlign = "left";
 	ctx.font = "bold 17px sans-serif";
 	ctx.fillStyle = "#ffffff";
-	ctx.fillText("COMMAND OVERVIEW & EXECUTION GUIDE", leftX + 26, leftY + 34);
+	ctx.fillText("COMMAND OVERVIEW", leftX + 26, leftY + 34);
 
 	ctx.font = "bold 11px sans-serif";
 	ctx.fillStyle = "#00d9ff";
-	ctx.fillText("DESCRIPTION, SYNTAX PARAMETERS & USAGE EXAMPLES", leftX + 26, leftY + 52);
+	ctx.fillText("DESCRIPTION, SYNTAX PARAMETERS & EXAMPLES", leftX + 26, leftY + 52);
 
 	ctx.font = "bold 13px sans-serif";
 	ctx.fillStyle = "#d2ecff";
@@ -756,7 +773,7 @@ function drawLiquidGlassHelpCard(
 
 	ctx.textAlign = "right";
 	ctx.fillStyle = "#00eaff";
-	ctx.fillText(`INVOCATION: ${prefix}${cmd.name}`, leftX + leftW - 26, leftY + 178);
+	ctx.fillText(`COMMAND: ${prefix}${cmd.name}`, leftX + leftW - 26, leftY + 178);
 	ctx.restore();
 
 	drawGlowingProgressBar(ctx, leftX + 26, leftY + 188, leftW - 52, 8, 0.76, "#0055ff", "#00ffaa");
@@ -765,7 +782,7 @@ function drawLiquidGlassHelpCard(
 	const guideBoxY = leftY + 208;
 	const guideBoxW = leftW - 52;
 	const guideBoxH = 166;
-	fillLiquidGlassPanel(
+	fillGlassPanel(
 		ctx,
 		guideBoxX,
 		guideBoxY,
@@ -798,22 +815,22 @@ function drawLiquidGlassHelpCard(
 	const miniGap = 18;
 	const miniCards = [
 		{
-			label: "PERMISSION LEVEL",
+			label: "ACCESS LEVEL",
 			value: getShortRoleBadge(cmd.role)
 		},
 		{
-			label: "COOLDOWN TIMER",
+			label: "COOLDOWN",
 			value: `${cmd.countDown} SECONDS`
 		},
 		{
-			label: "REGISTERED ALIASES",
-			value: cmd.aliases.length > 0 ? `${cmd.aliases.length} ALIASES` : "NO ALIASES"
+			label: "ALIASES",
+			value: cmd.aliases.length > 0 ? `${cmd.aliases.length} REGISTERED` : "NONE"
 		}
 	];
 
 	miniCards.forEach((card, idx) => {
 		const mx = leftX + 26 + idx * (miniW + miniGap);
-		fillLiquidGlassPanel(
+		fillGlassPanel(
 			ctx,
 			mx,
 			miniY,
@@ -840,7 +857,7 @@ function drawLiquidGlassHelpCard(
 	const rightY = 142;
 	const rightW = 426;
 	const rightH = 478;
-	fillLiquidGlassPanel(ctx, rightX, rightY, rightW, rightH, 18, "rgba(0, 238, 255, 0.32)");
+	fillGlassPanel(ctx, rightX, rightY, rightW, rightH, 18, "rgba(0, 238, 255, 0.32)");
 
 	ctx.save();
 	ctx.textAlign = "left";
@@ -850,7 +867,7 @@ function drawLiquidGlassHelpCard(
 
 	ctx.font = "bold 11px sans-serif";
 	ctx.fillStyle = "#00d9ff";
-	ctx.fillText("ENVIRONMENT & MODULE METADATA", rightX + 26, rightY + 52);
+	ctx.fillText("ENVIRONMENT CONFIGURATION", rightX + 26, rightY + 52);
 	ctx.restore();
 
 	const aliasPreview = cmd.aliases.length > 0 ? cmd.aliases.slice(0, 4).join(", ") : "None";
@@ -893,7 +910,7 @@ function drawLiquidGlassHelpCard(
 	const badgeY = rightY + 382;
 	const badgeW = rightW - 48;
 	const badgeH = 72;
-	fillLiquidGlassPanel(
+	fillGlassPanel(
 		ctx,
 		badgeX,
 		badgeY,
@@ -909,26 +926,26 @@ function drawLiquidGlassHelpCard(
 	ctx.textAlign = "left";
 	ctx.font = "bold 13.5px sans-serif";
 	ctx.fillStyle = "#00eaff";
-	ctx.fillText("QUEEN V3 ENGINE: OPTIMIZED", badgeX + 18, badgeY + 29);
+	ctx.fillText("CORE ENGINE: OPTIMIZED", badgeX + 18, badgeY + 29);
 
 	ctx.font = "12.5px sans-serif";
 	ctx.fillStyle = "#9ec4dc";
-	ctx.fillText("Designed by Priyanshi Kaur • Build v3.0.0", badgeX + 18, badgeY + 51);
+	ctx.fillText("Designed by Priyanshi Kaur", badgeX + 18, badgeY + 51);
 	ctx.restore();
 
 	ctx.save();
 	ctx.textAlign = "left";
 	ctx.font = "bold 11.5px sans-serif";
 	ctx.fillStyle = "#6c8ea6";
-	ctx.fillText("QUEENBOT TELEMETRY ENGINE • LIQUID GLASS UI", 52, 658);
+	ctx.fillText("QUEENBOT TELEMETRY ENGINE • BUILT WITH SKIA CANVAS", 52, 658);
 
 	ctx.textAlign = "right";
-	ctx.fillText(`TOTAL MODULES: ${totalCommands} • HELP V3.0.0`, 880, 658);
+	ctx.fillText(`TOTAL COMMANDS: ${totalCommands} • STABLE BUILD V3.0.0`, 880, 658);
 
 	ctx.textAlign = "center";
 	ctx.font = "bold 12px sans-serif";
 	ctx.fillStyle = "#7cefff";
-	ctx.fillText("STABLE V3.0", 1030, 690);
+	ctx.fillText("BUILD V3.0", 1030, 690);
 	ctx.restore();
 }
 
@@ -957,7 +974,7 @@ function buildSvgOverlayForSharp(
 		.replace(/\{p\}/g, prefix);
 	const guideLines = wrapTextLines(fakeCtx, formattedGuide, 648, 6);
 	const aliasPreview = cmd.aliases.length > 0 ? cmd.aliases.slice(0, 4).join(", ") : "None";
-	const aliasBadgeText = cmd.aliases.length > 0 ? `${cmd.aliases.length} ALIASES` : "NO ALIASES";
+	const aliasBadgeText = cmd.aliases.length > 0 ? `${cmd.aliases.length} REGISTERED` : "NONE";
 	const roleBadgeText = getShortRoleBadge(cmd.role);
 
 	const specRows = [
@@ -1032,25 +1049,25 @@ function buildSvgOverlayForSharp(
 
 		<rect x="0" y="0" width="${width}" height="${height}" fill="url(#bgDim)"/>
 
-		<text x="422" y="36" text-anchor="middle" fill="#7cefff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="12">QUEENBOT V3 • MODULE INSPECTOR</text>
+		<text x="422" y="36" text-anchor="middle" fill="#7cefff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="12">QUEENBOT V3 • COMMAND INSPECTOR</text>
 
 		<rect x="50" y="74" width="48" height="48" rx="12" fill="url(#badgeGrad)" stroke="#00f2ff" stroke-opacity="0.65" stroke-width="1.5"/>
 		<polygon points="61,107 59,92 68,99 74,88 80,99 89,92 87,107" fill="#e6ffff"/>
 
-		<text x="112" y="101" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="27">COMMAND • ${escapeXml(cmd.name.toUpperCase())}</text>
-		<text x="112" y="121" fill="#00eaff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11.5">LIQUID GLASS COMMAND ARCHITECTURE &amp; RUNTIME TELEMETRY</text>
+		<text x="112" y="101" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="27">QUEENBOT V3 • ${escapeXml(cmd.name.toUpperCase())}</text>
+		<text x="112" y="121" fill="#00eaff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11.5">COMMAND TELEMETRY &amp; EXECUTION GUIDE</text>
 
 		<rect x="776" y="76" width="454" height="46" rx="14" fill="url(#glassGrad)" stroke="#00eeff" stroke-opacity="0.38" stroke-width="1.4"/>
 		<circle cx="798" cy="99" r="5" fill="#00ff9d"/>
-		<text x="812" y="103" fill="#e8faff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="12">MODULE ONLINE</text>
+		<text x="812" y="103" fill="#e8faff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="12">SYSTEM ONLINE</text>
 		<text x="934" y="103" fill="#00e5ff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="12">BUILD: v${escapeXml(cmd.version)}</text>
 		<text x="1212" y="103" text-anchor="end" fill="#8aa8be" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="12">PREFIX: ${escapeXml(prefix)}</text>
 
 		<rect x="48" y="142" width="736" height="478" rx="18" fill="url(#glassGrad)" stroke="#00eeff" stroke-opacity="0.34" stroke-width="1.4"/>
 		<rect x="49" y="143" width="734" height="52" rx="17" fill="url(#sheenGrad)"/>
 
-		<text x="74" y="176" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="17">COMMAND OVERVIEW &amp; EXECUTION GUIDE</text>
-		<text x="74" y="194" fill="#00d9ff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11">DESCRIPTION, SYNTAX PARAMETERS &amp; USAGE EXAMPLES</text>
+		<text x="74" y="176" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="17">COMMAND OVERVIEW</text>
+		<text x="74" y="194" fill="#00d9ff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11">DESCRIPTION, SYNTAX PARAMETERS &amp; EXAMPLES</text>
 
 		<text x="74" y="228" fill="#d2ecff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="13">MODULE DESCRIPTION</text>
 		<text x="758" y="228" text-anchor="end" fill="#00eaff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="13">CATEGORY: ${escapeXml(cmd.category.toUpperCase())}</text>
@@ -1059,7 +1076,7 @@ function buildSvgOverlayForSharp(
 		${descSvg}
 
 		<text x="74" y="320" fill="#d2ecff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="13">SYNTAX &amp; USAGE GUIDE</text>
-		<text x="758" y="320" text-anchor="end" fill="#00eaff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="13">INVOCATION: ${escapeXml(prefix + cmd.name)}</text>
+		<text x="758" y="320" text-anchor="end" fill="#00eaff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="13">COMMAND: ${escapeXml(prefix + cmd.name)}</text>
 		<rect x="74" y="330" width="684" height="8" rx="4" fill="#ffffff" fill-opacity="0.08"/>
 		<rect x="74" y="330" width="520" height="8" rx="4" fill="url(#barMint)"/>
 
@@ -1067,32 +1084,32 @@ function buildSvgOverlayForSharp(
 		${guideSvg}
 
 		<rect x="74" y="530" width="216" height="68" rx="12" fill="url(#innerTerminalGrad)" stroke="#00e6ff" stroke-opacity="0.25" stroke-width="1.2"/>
-		<text x="90" y="555" fill="#7aa2bd" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="10.5">PERMISSION LEVEL</text>
+		<text x="90" y="555" fill="#7aa2bd" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="10.5">ACCESS LEVEL</text>
 		<text x="90" y="579" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="14.5">${escapeXml(roleBadgeText)}</text>
 
 		<rect x="308" y="530" width="216" height="68" rx="12" fill="url(#innerTerminalGrad)" stroke="#00e6ff" stroke-opacity="0.25" stroke-width="1.2"/>
-		<text x="324" y="555" fill="#7aa2bd" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="10.5">COOLDOWN TIMER</text>
+		<text x="324" y="555" fill="#7aa2bd" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="10.5">COOLDOWN</text>
 		<text x="324" y="579" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="14.5">${escapeXml(String(cmd.countDown))} SECONDS</text>
 
 		<rect x="542" y="530" width="216" height="68" rx="12" fill="url(#innerTerminalGrad)" stroke="#00e6ff" stroke-opacity="0.25" stroke-width="1.2"/>
-		<text x="558" y="555" fill="#7aa2bd" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="10.5">REGISTERED ALIASES</text>
+		<text x="558" y="555" fill="#7aa2bd" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="10.5">ALIASES</text>
 		<text x="558" y="579" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="14.5">${escapeXml(aliasBadgeText)}</text>
 
 		<rect x="804" y="142" width="426" height="478" rx="18" fill="url(#glassGrad)" stroke="#00eeff" stroke-opacity="0.34" stroke-width="1.4"/>
 		<rect x="805" y="143" width="424" height="52" rx="17" fill="url(#sheenGrad)"/>
 
 		<text x="830" y="176" fill="#ffffff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="17">SPECIFICATIONS</text>
-		<text x="830" y="194" fill="#00d9ff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11">ENVIRONMENT &amp; MODULE METADATA</text>
+		<text x="830" y="194" fill="#00d9ff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11">ENVIRONMENT CONFIGURATION</text>
 
 		${specsSvg}
 
 		<rect x="828" y="524" width="378" height="72" rx="13" fill="url(#badgeGrad)" stroke="#00eeff" stroke-opacity="0.42" stroke-width="1.3"/>
-		<text x="846" y="553" fill="#00eaff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="13.5">LIQUID GLASS ENGINE: OPTIMIZED</text>
-		<text x="846" y="575" fill="#9ec4dc" font-family="DejaVu Sans, Arial, sans-serif" font-size="12.5">Designed by Priyanshi Kaur • Build v3.0.0</text>
+		<text x="846" y="553" fill="#00eaff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="13.5">CORE ENGINE: OPTIMIZED</text>
+		<text x="846" y="575" fill="#9ec4dc" font-family="DejaVu Sans, Arial, sans-serif" font-size="12.5">Designed by Priyanshi Kaur</text>
 
-		<text x="52" y="658" fill="#6c8ea6" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11.5">QUEENBOT TELEMETRY ENGINE • NEXUS UI V4</text>
-		<text x="880" y="658" text-anchor="end" fill="#6c8ea6" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11.5">TOTAL MODULES: ${totalCommands} • HELP V3.0.0</text>
-		<text x="1030" y="690" text-anchor="middle" fill="#7cefff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="12">STABLE V3.0</text>
+		<text x="52" y="658" fill="#6c8ea6" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11.5">QUEENBOT TELEMETRY ENGINE • BUILT WITH SKIA CANVAS</text>
+		<text x="880" y="658" text-anchor="end" fill="#6c8ea6" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="11.5">TOTAL COMMANDS: ${totalCommands} • STABLE BUILD V3.0.0</text>
+		<text x="1030" y="690" text-anchor="middle" fill="#7cefff" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="12">BUILD V3.0</text>
 	</svg>`;
 
 	return Buffer.from(svg, "utf8");
@@ -1132,7 +1149,7 @@ async function generateHelpCardImage(cmd, prefix, totalCommands) {
 				}
 			}
 
-			drawLiquidGlassHelpCard(ctx, width, height, bgImg, cmd, prefix, totalCommands);
+			drawCommandHelpCard(ctx, width, height, bgImg, cmd, prefix, totalCommands);
 
 			let pngBuffer;
 			if (typeof canvas.toBuffer === "function") {
@@ -1207,6 +1224,28 @@ function cleanupTempCard(filePath, stream) {
 	}
 }
 
+async function unsendPromptMessage(api, message, promptMessageID) {
+	if (!promptMessageID) return;
+	if (global.GoatBot?.onReply instanceof Map) {
+		global.GoatBot.onReply.delete(promptMessageID);
+	}
+	try {
+		if (message && typeof message.unsend === "function") {
+			await message.unsend(promptMessageID);
+			return;
+		}
+	}
+	catch {
+	}
+	try {
+		if (api && typeof api.unsendMessage === "function") {
+			await api.unsendMessage(promptMessageID);
+		}
+	}
+	catch {
+	}
+}
+
 function buildFallbackCommandText(cmd, prefix) {
 	const aliasText = cmd.aliases.length > 0 ? cmd.aliases.join(", ") : "None";
 	const usageText = String(cmd.guide || "{pn}")
@@ -1214,18 +1253,18 @@ function buildFallbackCommandText(cmd, prefix) {
 		.replace(/\{p\}/g, prefix);
 
 	return [
-		`╭── 💠 COMMAND • ${cmd.name.toUpperCase()} ──╮`,
-		`│ 🏷️ Category : ${cmd.category}`,
-		`│ 🔖 Version  : v${cmd.version}`,
-		`│ 👑 Author   : ${cmd.author}`,
-		`│ 🛡️ Role     : ${getRoleLabel(cmd.role)}`,
-		`│ ⏱️ Cooldown : ${cmd.countDown}s`,
-		`│ 🔗 Aliases  : ${aliasText}`,
-		`╰────────────────────────────╯`,
+		`👑 ${prefix}${cmd.name} (v${cmd.version})`,
+		`────────────`,
+		`• Category: ${formatCategoryTitle(cmd.category)}`,
+		`• Author: ${cmd.author}`,
+		`• Role: ${getRoleLabel(cmd.role)}`,
+		`• Cooldown: ${cmd.countDown}s`,
+		`• Aliases: ${aliasText}`,
+		`────────────`,
 		`📝 Description:`,
 		`${cmd.longDescription || cmd.shortDescription}`,
 		``,
-		`📘 Usage Guide:`,
+		`📘 Usage:`,
 		`${usageText}`
 	].join("\n");
 }
@@ -1245,7 +1284,7 @@ async function sendCommandHelpCard(
 			stream.on("error", () => {});
 			const aliasLine = cmd.aliases.length > 0 ? ` • Aliases: ${cmd.aliases.join(", ")}` : "";
 			await message.reply({
-				body: `💠 Command Module: ${prefix}${cmd.name} (v${cmd.version})${aliasLine}`,
+				body: `👑 ${prefix}${cmd.name} (v${cmd.version})${aliasLine}`,
 				attachment: stream
 			});
 			setTimeout(() => cleanupTempCard(cardPath, stream), 15000);
@@ -1294,7 +1333,7 @@ function buildStructuredHelpDirectory(
 	}
 
 	if (sortedCategories.length === 0) {
-		return `⚠️ No commands found${categoryFilter ? ` in category "${categoryFilter}"` : ""}.`;
+		return `⚠️ No commands found${categoryFilter ? ` in "${categoryFilter}"` : ""}.`;
 	}
 
 	const categoriesPerPage = showAll || categoryFilter ? sortedCategories.length : 6;
@@ -1303,30 +1342,38 @@ function buildStructuredHelpDirectory(
 	const startIdx = (safePage - 1) * categoriesPerPage;
 	const visibleCategories = sortedCategories.slice(startIdx, startIdx + categoriesPerPage);
 
+	const modeText = categoryFilter
+		? formatCategoryTitle(categoryFilter)
+		: showAll
+			? "All Commands"
+			: `Page ${safePage}/${totalPages}`;
+
 	const lines = [
-		"╭━━━〔  QUEENBOT V3  〕━━━╮",
-		`│ ⚡ Prefix: ${prefix}   •   📦 Total Modules: ${commandsList.length}`,
-		`│ 🧭 Mode: ${categoryFilter ? `Category [${categoryFilter.toUpperCase()}]` : showAll ? "Full Command Catalog" : `Page ${safePage}/${totalPages}`}`,
-		"╰━━━━━━━━━━━━━━━━━━━━━╯"
+		`👑 QueenBot v3 • Help`,
+		`────────────`,
+		`• Prefix: ${prefix}`,
+		`• Total: ${commandsList.length} commands`,
+		`• View: ${modeText}`
 	];
 
 	for (const [catName, list] of visibleCategories) {
 		const icon = getCategoryIcon(catName);
-		const title = catName.toUpperCase();
-		const namesFormatted = list.map(c => `${prefix}${c.name}`).join("  •  ");
+		const title = formatCategoryTitle(catName);
+		const namesFormatted = list.map(c => c.name).join(", ");
 		lines.push("");
-		lines.push(`╭─ ${icon} ${title} [${list.length}]`);
-		lines.push(`╰┈➤ ${namesFormatted}`);
+		lines.push(`${icon} ${title} (${list.length})`);
+		lines.push(`${namesFormatted}`);
 	}
 
 	lines.push("");
-	lines.push("╭─── 💡 QUICK NAVIGATION & SMART HELP ───╮");
+	lines.push(`────────────`);
 	if (!showAll && !categoryFilter && totalPages > 1) {
-		lines.push(`│ 📄 Next Page : ${prefix}help ${safePage < totalPages ? safePage + 1 : 1}`);
+		lines.push(`• Page: ${prefix}help <1-${totalPages}>`);
 	}
-	lines.push(`│ 📚 Full List : ${prefix}help all`);
-	lines.push(`│ 🖼️ Card View : ${prefix}help <command_or_alias>`);
-	lines.push("╰────────────────────────────────────────╯");
+	if (!showAll) {
+		lines.push(`• All: ${prefix}help all`);
+	}
+	lines.push(`• Info: ${prefix}help <cmd>`);
 
 	return lines.join("\n");
 }
@@ -1338,20 +1385,20 @@ function buildSmartSuggestionPrompt(
 ) {
 	const clean = String(rawQuery || "").trim();
 	const lines = [
-		`⚠️ Command "${clean}" was not found.`,
-		"🔎 Smart Filter found the closest matching commands:",
+		`⚠️ Command "${clean}" not found.`,
+		`Did you mean:`,
 		""
 	];
 
 	suggestions.forEach((item, index) => {
 		const aliasPart = item.cmd.aliases.length > 0
-			? ` (aliases: ${item.cmd.aliases.slice(0, 3).join(", ")})`
+			? ` (${item.cmd.aliases.slice(0, 3).join(", ")})`
 			: "";
-		lines.push(`${index + 1}. ${prefix}${item.cmd.name} [${item.cmd.category.toUpperCase()}]${aliasPart}`);
+		lines.push(`${index + 1}. ${prefix}${item.cmd.name}${aliasPart}`);
 	});
 
 	lines.push("");
-	lines.push("💡 Reply with 1, 2, or 3 to view the Liquid Glass command card.");
+	lines.push("💡 Reply 1, 2, or 3 to view command info.");
 	return lines.join("\n");
 }
 
@@ -1364,19 +1411,19 @@ module.exports = {
 		countDown: 5,
 		role: 0,
 		shortDescription: {
-			vi: "Xem cách dùng lệnh và danh sách lệnh Liquid Glass",
-			en: "View command usage with Liquid Glass UI card & smart filtering"
+			vi: "Xem danh sách lệnh và hướng dẫn chi tiết",
+			en: "View command list and detailed command usage"
 		},
 		longDescription: {
-			vi: "Xem danh sách lệnh theo trang/danh mục hoặc xem thẻ hướng dẫn Liquid Glass cho từng lệnh kèm gợi ý thông minh",
-			en: "Browse the structured command catalog or render a Liquid Glass UI card for any specific command or alias with smart typo suggestions"
+			vi: "Xem danh sách lệnh theo trang hoặc xem thẻ hướng dẫn chi tiết cho từng lệnh kèm gợi ý thông minh",
+			en: "Browse the command catalog by page or category, or inspect any command card with smart typo suggestions"
 		},
 		category: "info",
 		guide: {
 			vi: "{pn} [<trang> | all | <tên lệnh>]",
 			en:
 				"{pn} [empty | <page> | all | -c <category>]\n" +
-				"{pn} <command_name | alias> — Render Liquid Glass command card\n" +
+				"{pn} <command_name | alias>\n" +
 				"Example:\n" +
 				"{pn}\n" +
 				"{pn} all\n" +
@@ -1387,14 +1434,14 @@ module.exports = {
 
 	langs: {
 		vi: {
-			roleText0: "0 • Tất cả người dùng",
-			roleText1: "1 • Quản trị viên nhóm",
-			roleText2: "2 • Admin Bot"
+			roleText0: "0 (Tất cả người dùng)",
+			roleText1: "1 (Quản trị viên nhóm)",
+			roleText2: "2 (Admin Bot)"
 		},
 		en: {
-			roleText0: "0 • All Users",
-			roleText1: "1 • Group Admin",
-			roleText2: "2 • Bot Admin"
+			roleText0: "0 (All Users)",
+			roleText1: "1 (Group Admin)",
+			roleText2: "2 (Bot Admin)"
 		}
 	},
 
@@ -1436,9 +1483,12 @@ module.exports = {
 			return await sendCommandHelpCard(message, matchedCommand, prefix, visibleCommands.length || allCommands.length);
 		}
 
-		const categoryMatch = visibleCommands.some(c => c.category.toLowerCase() === firstArgLower);
+		const joinedArgLower = rawArgs.join(" ").toLowerCase();
+		const categoryMatch = visibleCommands.find(
+			c => c.category.toLowerCase() === firstArgLower || c.category.toLowerCase() === joinedArgLower
+		);
 		if (categoryMatch) {
-			const text = buildStructuredHelpDirectory(visibleCommands, prefix, 1, true, firstArgLower);
+			const text = buildStructuredHelpDirectory(visibleCommands, prefix, 1, true, categoryMatch.category);
 			return await message.reply(text);
 		}
 
@@ -1460,10 +1510,10 @@ module.exports = {
 			return;
 		}
 
-		return await message.reply(`❌ Command "${query}" does not exist. Type ${prefix}help to browse all available commands.`);
+		return await message.reply(`❌ Command "${query}" does not exist. Type ${prefix}help to view all commands.`);
 	},
 
-	onReply: async function ({ event, message, Reply }) {
+	onReply: async function ({ api, event, message, Reply }) {
 		const { author, messageID, suggestions, prefix, totalCommands } = Reply || {};
 		if (author && String(event?.senderID) !== String(author)) {
 			return;
@@ -1477,9 +1527,7 @@ module.exports = {
 			return;
 		}
 
-		if (messageID && global.GoatBot?.onReply instanceof Map) {
-			global.GoatBot.onReply.delete(messageID);
-		}
+		await unsendPromptMessage(api, message, messageID);
 
 		const selectedCmd = suggestions[choice - 1];
 		const resolvedPrefix = prefix || getThreadPrefix(event?.threadID);
