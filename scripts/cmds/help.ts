@@ -1405,8 +1405,8 @@ function buildSmartSuggestionPrompt(
 module.exports = {
 	config: {
 		name: "help",
-		aliases: ["menu", "commands", "cmds", "h"],
-		version: "3.0.0",
+		aliases: ["menu"],
+		version: "3.1.0",
 		author: "Priyanshi Kaur",
 		countDown: 5,
 		role: 0,
