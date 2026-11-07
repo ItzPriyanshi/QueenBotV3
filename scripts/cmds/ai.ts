@@ -6,7 +6,7 @@ const PriyaPrefix = ["queen", "ai"];
 const historyFile = path.join(__dirname, "ai_history.json");
 const schedulesFile = path.join(__dirname, "ai_schedules.json");
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || (global as any).config?.geminiApiKey || "YOUR_GEMIN_API_KEY_HERE"; // place your api key from https://aistudio.google.com/api-keys
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || (global as any).config?.geminiApiKey || "YOUR_GEMINI_API_KEY_HERE"; // place your api key from https://aistudio.google.com/api-keys
 const GEMINI_MODEL = "gemini-2.5-flash"; // choose model according to your billing plans
 const MAX_HISTORY_MESSAGES = 20; // max 100 if 100+ it may react differently or buffer 
 
