@@ -8,7 +8,7 @@
 
 [![Bun](https://img.shields.io/badge/Bun-v1.0+-FBF0DF?style=for-the-badge&logo=bun&logoColor=black)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Version](https://img.shields.io/badge/Version-3.0.0-8A2BE2?style=for-the-badge)](https://github.com/ItzPriyanshi/QueenBotV2)
+[![Version](https://img.shields.io/badge/Version-3.1.0-8A2BE2?style=for-the-badge)](https://github.com/ItzPriyanshi/QueenBotV2)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 [![Author](https://img.shields.io/badge/Author-Priyanshi%20Kaur-FF69B4?style=for-the-badge)](https://github.com/ItzPriyanshi)
 
