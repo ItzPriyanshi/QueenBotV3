@@ -3,6 +3,8 @@ import fs from "fs";
 import path from "path";
 import log from "./logger/log.js";
 
+delete process.env.NODE_ENV;
+
 const isBun = typeof (globalThis as any).Bun !== "undefined" || Boolean((process as any).versions?.bun);
 const MAX_CRASHES = 10;
 const STABLE_MS = 60000;
@@ -14,6 +16,12 @@ let startedAt = 0;
 let activeChild: ChildProcess | null = null;
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
 let isShuttingDown = false;
+
+function buildCleanChildEnv(): NodeJS.ProcessEnv {
+	const envCopy: NodeJS.ProcessEnv = { ...process.env };
+	delete envCopy.NODE_ENV;
+	return envCopy;
+}
 
 function resolveRunnerConfig(): { runtimeCmd: string; runnerArgs: string[] } {
 	const tsEntry = path.join(__dirname, "Queen.ts");
@@ -62,7 +70,7 @@ function start(message?: string, delay = 0): void {
 			cwd: __dirname,
 			stdio: "inherit",
 			shell: process.platform === "win32",
-			env: { ...process.env }
+			env: buildCleanChildEnv()
 		});
 
 		activeChild = child;
