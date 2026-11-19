@@ -14,7 +14,7 @@
     "ignoreCommand": []
   },
   "adminBot": [
-    "61580695941306"
+    "YOUR_UID"
   ],
   "whiteListMode": {
     "enable": false,
@@ -25,8 +25,8 @@
     "whiteListThreadIds": []
   },
   "database": {
-    "type": "mongodb",
-    "uriMongodb": "mongodb+srv://alexmapelipro:alexmapelipro@cluster0.8vldk.mongodb.net/Queen?retryWrites=true&w=majority&appName=Cluster0",
+    "type": "sqlite",
+    "uriMongodb": "",
     "autoSyncWhenStart": false,
     "autoRefreshThreadInfoFirstTime": true
   },
@@ -51,7 +51,7 @@
   "autoUptime": {
     "enable": true,
     "timeInterval": 180,
-    "url": "https://queenbotv3pro.onrender.com"
+    "url": "YOUR_HOST_URL"
   },
   "autoLoadScripts": {
     "enable": false,
