@@ -2,7 +2,13 @@ const fs = require("fs-extra");
 const path = require("path");
 const axios = require("axios");
 const https = require("https");
-const toolRegistry = require("./toolRegistry");
+let toolRegistry: any;
+try {
+	toolRegistry = require("./toolRegistry");
+}
+catch {
+	toolRegistry = require("./toolRegistry.ts");
+}
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
@@ -746,6 +752,27 @@ function extractSingleClauseStep(clause) {
 	return null;
 }
 
+const RANDOM_HIT_SONGS = [
+	"Blinding Lights The Weeknd",
+	"Starboy The Weeknd",
+	"Faded Alan Walker",
+	"Shape of You Ed Sheeran",
+	"Believer Imagine Dragons",
+	"Stay The Kid LAROI Justin Bieber",
+	"Levitating Dua Lipa",
+	"Perfect Ed Sheeran",
+	"Sunflower Post Malone",
+	"Heat Waves Glass Animals",
+	"Kesariya Arijit Singh",
+	"Apna Bana Le Arijit Singh",
+	"Night Changes One Direction",
+	"Until I Found You Stephen Sanchez",
+	"Attention Charlie Puth",
+	"Counting Stars OneRepublic",
+	"Mockingbird Eminem",
+	"Dandelions Ruth B"
+];
+
 function parseNaturalTaskIntent(prompt) {
 	const p = String(prompt || "").trim();
 	const lower = p.toLowerCase();
@@ -845,6 +872,82 @@ function parseNaturalTaskIntent(prompt) {
 				};
 			}
 		}
+	}
+
+	const immediateTriggerMatch = p.match(
+		/^(?:(?:use|run|trigger|execute|call|start|launch|invoke|play)(?:\s*,\s*|\s+or\s+|\s+and\s+|\s+))+(?:the\s+)?([a-zA-Z0-9_$-]+)(?:\s+command|\s+cmd)?(?:\s+(?:with|using|for|on)\s+(.+)|\s+(.+))?$/i
+	);
+
+	if (immediateTriggerMatch && !isRecurring && !oneTimeMatch) {
+		const rawCmd = immediateTriggerMatch[1].trim();
+		const rawTail = (immediateTriggerMatch[2] || immediateTriggerMatch[3] || "").trim();
+		const monitorResponseTime = /\b(?:monitor(?:ing)?|measure(?:ing)?|check(?:ing)?|track(?:ing)?|log(?:ging)?|show|report|display|measure)\s+(?:the\s+)?(?:response\s+time|latency|execution\s+time|speed|ping|duration)\b/i.test(rawTail) || /\b(?:response\s+time|latency|execution\s+time)\b/i.test(rawTail);
+
+		const cleanedTail = rawTail
+			.replace(/(?:and\s+)?(?:monitor(?:ing)?|measure(?:ing)?|check(?:ing)?|track(?:ing)?|log(?:ging)?|show|report|display|measure)?\s*(?:the\s+)?(?:response\s+time|latency|execution\s+time|speed|ping|duration)\b/gi, "")
+			.replace(/^(?:command|cmd)\b/i, "")
+			.trim();
+
+		const canonical = toolRegistry.resolveToolName(rawCmd) || rawCmd.toLowerCase();
+		const isRandomRequest = /\brandom\s+(?:song|music|track|query|request)\b/i.test(cleanedTail) || /\ba?\s*random\s+(?:song|track)\b/i.test(cleanedTail) || cleanedTail.toLowerCase() === "random";
+
+		let chosenSong = "";
+		let finalArgs = [];
+
+		if (["sing", "music", "ytb", "spotify"].includes(canonical) && (isRandomRequest || !cleanedTail)) {
+			chosenSong = RANDOM_HIT_SONGS[Math.floor(Math.random() * RANDOM_HIT_SONGS.length)];
+			finalArgs = canonical === "ytb" ? ["-a", ...chosenSong.split(/\s+/)] : chosenSong.split(/\s+/);
+		}
+		else if (cleanedTail) {
+			finalArgs = cleanedTail.split(/\s+/).filter(Boolean);
+		}
+
+		return {
+			type: "immediate_tool",
+			command: canonical,
+			args: finalArgs,
+			monitorResponseTime,
+			isRandomRequest,
+			chosenSong
+		};
+	}
+
+	const playSongMatch = p.match(/^play\s+(?:a\s+)?(?:random\s+)?(?:song|music|track)?(?:\s+(.+))?$/i);
+	if (playSongMatch && !isRecurring && !oneTimeMatch) {
+		const rawQuery = (playSongMatch[1] || "").trim();
+		const monitorResponseTime = /\b(?:monitor(?:ing)?|measure(?:ing)?|check(?:ing)?|track(?:ing)?|log(?:ging)?|show|report|display|measure)\s+(?:the\s+)?(?:response\s+time|latency|execution\s+time|speed|ping|duration)\b/i.test(rawQuery) || /\b(?:response\s+time|latency|execution\s+time)\b/i.test(rawQuery);
+		const cleanedQuery = rawQuery
+			.replace(/(?:and\s+)?(?:monitor(?:ing)?|measure(?:ing)?|check(?:ing)?|track(?:ing)?|log(?:ging)?|show|report|display|measure)?\s*(?:the\s+)?(?:response\s+time|latency|execution\s+time|speed|ping|duration)\b/gi, "")
+			.trim();
+		const isRandom = !cleanedQuery || /\brandom\b/i.test(p);
+		const chosenSong = isRandom ? RANDOM_HIT_SONGS[Math.floor(Math.random() * RANDOM_HIT_SONGS.length)] : cleanedQuery;
+		return {
+			type: "immediate_tool",
+			command: "sing",
+			args: chosenSong.split(/\s+/).filter(Boolean),
+			monitorResponseTime,
+			isRandomRequest: isRandom,
+			chosenSong
+		};
+	}
+
+	const directCmdTrigger = p.match(/^([a-zA-Z0-9_$-]+)\s+(?:command|cmd)(?:\s+(.+))?$/i);
+	if (directCmdTrigger && !isRecurring && !oneTimeMatch) {
+		const rawCmd = directCmdTrigger[1].trim();
+		const rawTail = (directCmdTrigger[2] || "").trim();
+		const monitorResponseTime = /\b(?:monitor(?:ing)?|measure(?:ing)?|check(?:ing)?|track(?:ing)?|log(?:ging)?|show|report|display|measure)\s+(?:the\s+)?(?:response\s+time|latency|execution\s+time|speed|ping|duration)\b/i.test(rawTail) || /\b(?:response\s+time|latency|execution\s+time)\b/i.test(rawTail);
+		const cleanedTail = rawTail
+			.replace(/(?:and\s+)?(?:monitor(?:ing)?|measure(?:ing)?|check(?:ing)?|track(?:ing)?|log(?:ging)?|show|report|display|measure)?\s*(?:the\s+)?(?:response\s+time|latency|execution\s+time|speed|ping|duration)\b/gi, "")
+			.trim();
+		const canonical = toolRegistry.resolveToolName(rawCmd) || rawCmd.toLowerCase();
+		return {
+			type: "immediate_tool",
+			command: canonical,
+			args: cleanedTail ? cleanedTail.split(/\s+/).filter(Boolean) : [],
+			monitorResponseTime,
+			isRandomRequest: false,
+			chosenSong: ""
+		};
 	}
 
 	return null;
@@ -1431,6 +1534,23 @@ async function handleQueenAgentTurn(options) {
 	});
 	const honorific = userIdentity.isOwner ? "My Queen" : userIdentity.name;
 
+	const effectiveRole = userIdentity.isOwner ? 2 : (Number(role) || 0);
+	const execContext = {
+		api,
+		message,
+		event,
+		role: effectiveRole,
+		prefix,
+		usersData,
+		threadsData,
+		threadModel,
+		userModel,
+		dashBoardModel,
+		globalModel,
+		dashBoardData,
+		globalData
+	};
+
 	const jailbreakBlocked = checkJailbreakAttempt(rawPrompt, userIdentity);
 	if (jailbreakBlocked) {
 		return await deliverAgentMessage(message, api, null, jailbreakBlocked, [], uid, threadID);
@@ -1475,6 +1595,29 @@ async function handleQueenAgentTurn(options) {
 
 	const naturalTask = parseNaturalTaskIntent(rawPrompt);
 	if (naturalTask) {
+		if (naturalTask.type === "immediate_tool") {
+			const startPerf = performance.now();
+			const toolResult = await toolRegistry.executeCommandAsTool({
+				commandName: naturalTask.command,
+				args: naturalTask.args,
+				...execContext,
+				captureOutput: false
+			});
+			const elapsedMs = Math.round(performance.now() - startPerf);
+
+			if (naturalTask.monitorResponseTime) {
+				const songDesc = naturalTask.chosenSong ? ` ("${naturalTask.chosenSong}")` : (naturalTask.args.length ? ` ${naturalTask.args.join(" ")}` : "");
+				const telemetryMsg =
+					`⚡ Queen Bot • Execution Telemetry\n` +
+					`────────────\n` +
+					`• Command: ${prefix}${naturalTask.command}${songDesc}\n` +
+					`• Response Time: ${elapsedMs} ms\n` +
+					`• Status: ${toolResult.ok ? "🟢 Completed Successfully" : "⚠️ Error: " + toolResult.error}\n` +
+					`• Runtime Engine: ${process.versions.bun ? "Bun v" + process.versions.bun : "Node.js " + process.version}`;
+				await message.reply(telemetryMsg);
+			}
+			return;
+		}
 		if (naturalTask.type === "manage_schedules") {
 			return await handleScheduleManagement(
 				naturalTask.subAction,
@@ -1550,7 +1693,14 @@ async function handleQueenAgentTurn(options) {
 		? `\n[Replied Message: "${String(event.messageReply.body).slice(0, 500)}"]`
 		: "";
 
+	const systemBanner =
+		`[QUEENBOT AI AGENTIC CORE]\n` +
+		`You are Queen Bot, an autonomous AI assistant powering QueenBotV3 on Facebook Messenger.\n` +
+		`When asked to run, trigger, or use a bot tool or command, always output <QUEEN_ACTION>{"action":"run_tool","command":"<command>","args":[...]}</QUEEN_ACTION>.\n` +
+		`Never state that you cannot execute commands, interact with messaging APIs, or monitor response times.`;
+
 	const compositePrompt = [
+		systemBanner,
 		recentHistory ? `[Recent Chat Context]:\n${recentHistory}\n` : "",
 		`[User (${honorific}, UID: ${uid})]: ${rawPrompt}${replyContext}`
 	]
@@ -1584,6 +1734,42 @@ async function handleQueenAgentTurn(options) {
 		await executeParsedQueenActions(parsedActions, options, userIdentity, thinking);
 		appendUserHistoryTurn(uid, rawPrompt, `[Executed Actions: ${parsedActions.map(a => a.action).join(", ")}]`);
 		return;
+	}
+
+	const isCapabilityRefusal =
+		/(?:cannot|can't)\s+(?:execute|run|trigger|interact)\s+(?:custom\s+)?(?:bot\s+)?commands/i.test(rawResponse) ||
+		/interact with external messaging APIs/i.test(rawResponse) ||
+		/monitor live system response times/i.test(rawResponse);
+
+	if (isCapabilityRefusal) {
+		const extracted = extractSingleClauseStep(rawPrompt);
+		if (extracted && extracted.command) {
+			const startPerf = performance.now();
+			const toolResult = await toolRegistry.executeCommandAsTool({
+				commandName: extracted.command,
+				args: extracted.args,
+				...execContext,
+				captureOutput: false
+			});
+			const elapsedMs = Math.round(performance.now() - startPerf);
+			if (thinking?.messageID) {
+				try {
+					if (message && typeof message.unsend === "function") {
+						await message.unsend(thinking.messageID);
+					}
+					else if (api && typeof api.unsendMessage === "function") {
+						await api.unsendMessage(thinking.messageID);
+					}
+				}
+				catch {}
+			}
+			if (/response\s+time|latency/i.test(rawPrompt)) {
+				await message.reply(
+					`⚡ Queen Bot • Execution Telemetry\n────────────\n• Command: ${prefix}${extracted.command}\n• Response Time: ${elapsedMs} ms\n• Status: ${toolResult.ok ? "🟢 Completed Successfully" : "⚠️ Error: " + toolResult.error}`
+				);
+			}
+			return;
+		}
 	}
 
 	const cleanReply = sanitizeAndFormatOutput(rawResponse);

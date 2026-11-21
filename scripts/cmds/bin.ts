@@ -37,7 +37,7 @@ const MOCKY_EXPIRATION_MAP: Record<string, string> = {
 };
 
 const PRIVACY_LABELS: Record<string, string> = {
-	"0": "Public"
+	"0": "Public",
 	"1": "Unlisted",
 	"2": "Private"
 };
@@ -487,8 +487,8 @@ function buildSuggestionMessage(rawQuery: string, suggestions: { entry: CommandE
 
 module.exports = {
 	config: {
-		name: "paste",
-		aliases: ["pastebin", "mocky", "bin"],
+		name: "bin",
+		aliases: ["paste", "pastebin", "mocky"],
 		version: "2.4.0",
 		author: "Priyanshi Kaur",
 		countDown: 5,
