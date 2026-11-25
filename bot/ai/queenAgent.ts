@@ -16,9 +16,98 @@ const DATA_DIR = path.join(process.cwd(), "scripts", "cmds");
 const HISTORY_FILE = path.join(DATA_DIR, "ai_history.json");
 const SCHEDULES_FILE = path.join(DATA_DIR, "ai_schedules.json");
 const RESPONSE_RULES_FILE = path.join(DATA_DIR, "ai_response_rules.json");
+const AI_SETTINGS_FILE = path.join(DATA_DIR, "ai_settings.json");
 
 const activeTimers = new Map();
 let savedRuntimeContext = null;
+
+function loadAiSettings() {
+	return readJsonSafe(AI_SETTINGS_FILE, {
+		enabledForUsers: true,
+		blockedUsers: {}
+	});
+}
+
+function saveAiSettings(settings) {
+	writeJsonSafe(AI_SETTINGS_FILE, settings || { enabledForUsers: true, blockedUsers: {} });
+}
+
+function isUserBlocked(uid) {
+	if (!uid) return false;
+	const s = String(uid);
+	if (s === toolRegistry.OWNER_UID) return false;
+	const settings = loadAiSettings();
+	return Boolean(settings?.blockedUsers && settings.blockedUsers[s]);
+}
+
+function isAiEnabledForUser(uid, role = 0) {
+	const s = String(uid || "");
+	if (s === toolRegistry.OWNER_UID || Number(role) >= 1) return true;
+	if (isUserBlocked(s)) return false;
+	const settings = loadAiSettings();
+	return settings.enabledForUsers !== false;
+}
+
+function blockUser(uid, reason = "Blocked by Admin", blockedBy = "") {
+	const s = String(uid);
+	if (!s || s === toolRegistry.OWNER_UID) return false;
+	const settings = loadAiSettings();
+	if (!settings.blockedUsers || typeof settings.blockedUsers !== "object") {
+		settings.blockedUsers = {};
+	}
+	settings.blockedUsers[s] = {
+		blockedAt: Date.now(),
+		reason: String(reason || "Blocked by Admin"),
+		blockedBy: String(blockedBy || "")
+	};
+	saveAiSettings(settings);
+	return true;
+}
+
+function unblockUser(uid) {
+	const s = String(uid);
+	const settings = loadAiSettings();
+	if (settings?.blockedUsers && settings.blockedUsers[s]) {
+		delete settings.blockedUsers[s];
+		saveAiSettings(settings);
+		return true;
+	}
+	return false;
+}
+
+function setAiUsersEnabled(enabled) {
+	const settings = loadAiSettings();
+	settings.enabledForUsers = Boolean(enabled);
+	saveAiSettings(settings);
+	return settings.enabledForUsers;
+}
+
+function extractImageUrlFromContext(event, text = "") {
+	if (Array.isArray(event?.attachments)) {
+		for (const att of event.attachments) {
+			if (att?.type === "photo" || att?.type === "image") {
+				const url = att.url || att.largePreviewUrl || att.previewUrl;
+				if (url) return url;
+			}
+		}
+	}
+	if (Array.isArray(event?.messageReply?.attachments)) {
+		for (const att of event.messageReply.attachments) {
+			if (att?.type === "photo" || att?.type === "image") {
+				const url = att.url || att.largePreviewUrl || att.previewUrl;
+				if (url) return url;
+			}
+		}
+	}
+	const str = String(text || "");
+	const match = str.match(/https?:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp|gif|bmp)(?:\?[^\s"'<>]*)?/i) ||
+		str.match(/https?:\/\/(?:i\.)?ibb\.co\/[^\s"'<>]+/i) ||
+		str.match(/https?:\/\/(?:images\.unsplash\.com|cdn\.discordapp\.com|media\.discordapp\.net|res\.cloudinary\.com|i\.imgur\.com)\/[^\s"'<>]+/i);
+	if (match) {
+		return match[0];
+	}
+	return "";
+}
 
 function sleep(ms) {
 	return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
@@ -223,12 +312,16 @@ function buildDynamicSystemPrompt(userIdentity) {
 		``,
 		`CORE DIRECTIVES:`,
 		...directives.map(d => `• ${d}`),
+		`• CRITICAL OUTPUT FORMAT: Keep all responses short, simple, concise, and direct with NO extra details or unsolicited filler unless user explicitly asks.`,
+		`• SONG REQUEST DIRECTIVE: Whenever a user asks for a song, music, or audio track, route to command 'sing' (or 'ytb'). Never use unconfigured spotify.`,
+		`• CAPABILITY REFUSAL FORBIDDEN: You have full authority to execute any bot command and FCA APIs. Never refuse or claim lack of tools.`,
+		`• ZERO COMMENTS IN SCRIPTS: Whenever generating, creating, or modifying bot scripts, write clean JavaScript/TypeScript with absolutely ZERO comments.`,
 		``,
 		`TEMPORAL & SMART TASK RULES:`,
 		...temporalRules.map(r => `• ${r}`),
 		``,
 		`AGENTIC <QUEEN_ACTION> JSON PROTOCOL:`,
-		`When you need to execute a command tool, schedule a one-time delayed task, schedule a recurring task, call an FCA API, search the web, modify a command response, or read/edit/create/reload a script, output a valid JSON object inside <QUEEN_ACTION>...</QUEEN_ACTION>:`,
+		`When you need to execute a command tool, schedule a one-time delayed task, schedule a recurring task, call an FCA API, search the web, modify a command response, or read/edit/create/delete/reload a script, output a valid JSON object inside <QUEEN_ACTION>...</QUEEN_ACTION>:`,
 		`1. Single immediate command: <QUEEN_ACTION>{"action":"run_tool","command":"<name>","args":[...],"modifyResponse":"<optional>"}</QUEEN_ACTION>`,
 		`2. One-time delayed task ("after 1 hour", "in 10 minutes" — runs ONCE, never repeats): <QUEEN_ACTION>{"action":"schedule_once","delaySeconds":3600,"description":"...","steps":[{"command":"<name>","args":[...],"fuzzySearch":true}]}</QUEEN_ACTION>`,
 		`3. Multi-step sequence (runs once): <QUEEN_ACTION>{"action":"run_workflow","steps":[{"command":"<name>","args":[],"delaySecondsBefore":0}]}</QUEEN_ACTION>`,
@@ -237,7 +330,7 @@ function buildDynamicSystemPrompt(userIdentity) {
 		`6. Independent FCA API call (${fcaMethods}): <QUEEN_ACTION>{"action":"call_fca_api","method":"<methodName>","args":[...]}</QUEEN_ACTION>`,
 		`7. Web/YouTube search for fuzzy queries: <QUEEN_ACTION>{"action":"web_search","query":"...","thenRunCommand":"<optional_cmd>","thenArgsPrefix":["-a"]}</QUEEN_ACTION>`,
 		`8. Persistent command output modifier: <QUEEN_ACTION>{"action":"set_response_modifier","command":"<name>","mode":"ai_rewrite|replace|append|prepend|reset","instruction":"..."}</QUEEN_ACTION>`,
-		`9. Script management (Owner/Admin): <QUEEN_ACTION>{"action":"read_script|modify_script|create_script|reload_script","target":"<scriptName>","instruction":"...","code":"..."}</QUEEN_ACTION>`,
+		`9. Script management (Owner/Admin): <QUEEN_ACTION>{"action":"read_script|modify_script|create_script|delete_script|reload_script","target":"<scriptName>","instruction":"...","code":"..."}</QUEEN_ACTION>`,
 		``,
 		`AVAILABLE COMMAND TOOLS:`,
 		toolCatalog
@@ -246,19 +339,22 @@ function buildDynamicSystemPrompt(userIdentity) {
 	return toolRegistry.truncateToTokenBudget(fullSystem, maxSysTokens);
 }
 
-async function callMeowGeminiApi({ prompt, uid, model = "gemini-auto", system = "" }) {
+async function callMeowGeminiApi({ prompt, uid, model = "gemini-auto", system = "", image = "" }) {
 	const vault = toolRegistry.loadEncryptedTrainData();
 	const endpoint = vault.apiConfig?.fullEndpoint || ["https:", "", "meow-dl.onrender.com", "g"].join("/");
 	const timeoutMs = vault.apiConfig?.timeoutMs || 45000;
 	const maxPromptTokens = vault.tokenizerConfig?.maxInputTokens || 6000;
 
 	const safePrompt = toolRegistry.truncateToTokenBudget(prompt, maxPromptTokens);
-	const payload = {
+	const payload: any = {
 		prompt: safePrompt,
 		model: model || "gemini-auto",
 		uid: String(uid || "queenbot_default"),
 		...(system ? { system } : {})
 	};
+	if (image) {
+		payload.image = image;
+	}
 
 	try {
 		const postRes = await axios.post(endpoint, payload, {
@@ -284,6 +380,7 @@ async function callMeowGeminiApi({ prompt, uid, model = "gemini-auto", system = 
 		params.set("model", model || "gemini-auto");
 		if (uid) params.set("uid", String(uid));
 		if (system) params.set("system", toolRegistry.truncateToTokenBudget(system, 900));
+		if (image) params.set("image", image);
 
 		const getUrl = `${endpoint}?${params.toString()}`;
 		const getRes = await axios.get(getUrl, {
@@ -302,7 +399,7 @@ async function callMeowGeminiApi({ prompt, uid, model = "gemini-auto", system = 
 			throw new Error(getRes.data.error);
 		}
 	}
-	catch (err) {
+	catch (err: any) {
 		return {
 			ok: false,
 			error: err?.response?.data?.error || err?.message || "Failed to reach Queen AI endpoint"
@@ -804,6 +901,53 @@ function parseNaturalTaskIntent(prompt) {
 		};
 	}
 
+	const uidMatch = lower.match(/^(?:give\s+(?:me\s+)?(?:his|her|their|user|this|the)?\s*uid|what(?:'s|\s+is)\s+(?:his|her|their|user|the)?\s*uid|(?:get|find|fetch|show)\s+(?:his|her|their|the)?\s*uid|uid(?:\s+(?:of|for))?\s*(.+)?|whois(?:\s+(.+))?)$/i) ||
+		(lower.includes("uid") && /(?:give|get|find|show|fetch|tell)\s+(?:me\s+)?(?:his|her|their|user|the)?\s*uid/i.test(lower));
+	if (uidMatch) {
+		const rawTarget = uidMatch[1] || uidMatch[2] || "";
+		return {
+			type: "resolve_uid",
+			target: rawTarget.trim()
+		};
+	}
+
+	if (
+		/\b(?:bot\s+runtime|bot\s+uptime|system\s+uptime|runtime\s+and\s+time|runtime\s+and\s+current\s+time|current\s+time\s+india|time\s+in\s+india|india\s+time)\b/i.test(lower) ||
+		(/\b(?:runtime|uptime)\b/i.test(lower) && /\b(?:time|india)\b/i.test(lower))
+	) {
+		return {
+			type: "uptime_and_time"
+		};
+	}
+
+	const delScriptMatch = lower.match(/^(?:delete|remove)\s+(?:command|cmd|script)\s+([a-zA-Z0-9_$-]+)$/i);
+	if (delScriptMatch) {
+		return {
+			type: "delete_script",
+			target: delScriptMatch[1].trim()
+		};
+	}
+
+	const aiOnMatch = lower.match(/^(?:ai\s+on|turn\s+on\s+ai|enable\s+ai(?:\s+for\s+users)?)$/i);
+	if (aiOnMatch) {
+		return { type: "ai_control", action: "on" };
+	}
+	const aiOffMatch = lower.match(/^(?:ai\s+off|turn\s+off\s+ai|disable\s+ai(?:\s+for\s+users)?)$/i);
+	if (aiOffMatch) {
+		return { type: "ai_control", action: "off" };
+	}
+	const aiBlockMatch = lower.match(/^(?:ai\s+block|block\s+ai\s+user)\s*(.*)$/i);
+	if (aiBlockMatch) {
+		return { type: "ai_control", action: "block", target: aiBlockMatch[1].trim() };
+	}
+	const aiUnblockMatch = lower.match(/^(?:ai\s+unblock|unblock\s+ai\s+user)\s*(.*)$/i);
+	if (aiUnblockMatch) {
+		return { type: "ai_control", action: "unblock", target: aiUnblockMatch[1].trim() };
+	}
+	if (/^(?:ai\s+status|ai\s+settings|ai\s+info)$/i.test(lower)) {
+		return { type: "ai_control", action: "status" };
+	}
+
 	const isRecurring = /\b(?:every\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)|every\s+day|daily|every\s+hour|hourly)\b/i.test(lower);
 
 	if (isRecurring) {
@@ -904,7 +1048,7 @@ function parseNaturalTaskIntent(prompt) {
 
 		return {
 			type: "immediate_tool",
-			command: canonical,
+			command: canonical === "spotify" ? "sing" : canonical,
 			args: finalArgs,
 			monitorResponseTime,
 			isRandomRequest,
@@ -942,7 +1086,7 @@ function parseNaturalTaskIntent(prompt) {
 		const canonical = toolRegistry.resolveToolName(rawCmd) || rawCmd.toLowerCase();
 		return {
 			type: "immediate_tool",
-			command: canonical,
+			command: canonical === "spotify" ? "sing" : canonical,
 			args: cleanedTail ? cleanedTail.split(/\s+/).filter(Boolean) : [],
 			monitorResponseTime,
 			isRandomRequest: false,
@@ -1162,11 +1306,14 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 			});
 
 			if (!toolResult.ok) {
+				const githubHelp = toolResult.githubSolution
+					? `\n\n💡 Suggested Solution (${toolResult.githubSolution.githubRef}):\n• ${toolResult.githubSolution.fix}\n• Ref: ${toolResult.githubSolution.repo}`
+					: "";
 				await deliverAgentMessage(
 					message,
 					api,
 					thinkingMsg,
-					`⚠️ ${honorific}, I could not run "${cmdName}": ${toolResult.error}`,
+					`⚠️ ${honorific}, I could not run "${cmdName}": ${toolResult.error}${githubHelp}`,
 					[],
 					uid,
 					threadID
@@ -1399,7 +1546,7 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 				await deliverAgentMessage(message, api, thinkingMsg, msgText, [], uid, threadID);
 			}
 		}
-		else if (["read_script", "modify_script", "create_script", "reload_script"].includes(actionType)) {
+		else if (["read_script", "modify_script", "create_script", "delete_script", "reload_script"].includes(actionType)) {
 			if (effectiveRole < 2) {
 				await deliverAgentMessage(
 					message,
@@ -1430,6 +1577,20 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 						threadID
 					);
 				}
+			}
+			else if (actionType === "delete_script") {
+				const delRes = await toolRegistry.deleteBotScript(actObj.target, savedRuntimeContext || execContext);
+				await deliverAgentMessage(
+					message,
+					api,
+					thinkingMsg,
+					delRes.ok
+						? `🗑️ Deleted script "${delRes.fileName}" and unloaded command.`
+						: `⚠️ Failed to delete script: ${delRes.error}`,
+					[],
+					uid,
+					threadID
+				);
 			}
 			else if (actionType === "reload_script") {
 				const relRes = await toolRegistry.reloadBotScript(actObj.target, savedRuntimeContext || execContext);
@@ -1470,6 +1631,7 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 					continue;
 				}
 
+				finalCode = toolRegistry.stripCommentsFromCode(finalCode);
 				const writeRes = await toolRegistry.writeAndReloadBotScript({
 					targetName: actObj.target,
 					code: finalCode,
@@ -1551,6 +1713,17 @@ async function handleQueenAgentTurn(options) {
 		globalData
 	};
 
+	if (isUserBlocked(uid)) {
+		return;
+	}
+
+	if (!isAiEnabledForUser(uid, effectiveRole)) {
+		if (options.isDirectCommand) {
+			return await deliverAgentMessage(message, api, null, `⚠️ AI is currently turned off for users by admin.`, [], uid, threadID);
+		}
+		return;
+	}
+
 	const jailbreakBlocked = checkJailbreakAttempt(rawPrompt, userIdentity);
 	if (jailbreakBlocked) {
 		return await deliverAgentMessage(message, api, null, jailbreakBlocked, [], uid, threadID);
@@ -1595,6 +1768,78 @@ async function handleQueenAgentTurn(options) {
 
 	const naturalTask = parseNaturalTaskIntent(rawPrompt);
 	if (naturalTask) {
+		if (naturalTask.type === "resolve_uid") {
+			const targetInput = naturalTask.target || rawPrompt;
+			const uidRes = await toolRegistry.findUserUid(targetInput, event, api, threadsData, usersData);
+			if (uidRes && uidRes.uid) {
+				return await deliverAgentMessage(message, api, null, `🆔 UID: ${uidRes.uid} (${uidRes.name})`, [], uid, threadID);
+			}
+			return await deliverAgentMessage(message, api, null, `⚠️ Could not find UID for that user.`, [], uid, threadID);
+		}
+		if (naturalTask.type === "uptime_and_time") {
+			const uptimeSec = Math.floor(process.uptime());
+			const d = Math.floor(uptimeSec / 86400);
+			const h = Math.floor((uptimeSec % 86400) / 3600);
+			const m = Math.floor((uptimeSec % 3600) / 60);
+			const s = uptimeSec % 60;
+			const uptimeStr = `${d > 0 ? `${d}d ` : ""}${h}h ${m}m ${s}s`;
+			const istTime = new Date().toLocaleString("en-US", {
+				timeZone: "Asia/Kolkata",
+				hour12: true,
+				dateStyle: "medium",
+				timeStyle: "medium"
+			});
+			const memMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+			const replyBody = `⏱️ Uptime: ${uptimeStr}\n🇮🇳 India Time: ${istTime}\n💾 Memory: ${memMb} MB`;
+			return await deliverAgentMessage(message, api, null, replyBody, [], uid, threadID);
+		}
+		if (naturalTask.type === "delete_script") {
+			if (effectiveRole < 2) {
+				return await deliverAgentMessage(message, api, null, `⚠️ Only Admin or Owner can delete bot scripts.`, [], uid, threadID);
+			}
+			const delRes = await toolRegistry.deleteBotScript(naturalTask.target, savedRuntimeContext || execContext);
+			if (delRes.ok) {
+				return await deliverAgentMessage(message, api, null, `🗑️ Deleted script "${delRes.fileName}" and unloaded command.`, [], uid, threadID);
+			}
+			return await deliverAgentMessage(message, api, null, `⚠️ Failed to delete script: ${delRes.error}`, [], uid, threadID);
+		}
+		if (naturalTask.type === "ai_control") {
+			if (effectiveRole < 1 && !userIdentity.isOwner) {
+				return await deliverAgentMessage(message, api, null, `⚠️ Only Admin or Owner can change AI settings.`, [], uid, threadID);
+			}
+			if (naturalTask.action === "on") {
+				setAiUsersEnabled(true);
+				return await deliverAgentMessage(message, api, null, `✅ AI turned ON for all users.`, [], uid, threadID);
+			}
+			if (naturalTask.action === "off") {
+				setAiUsersEnabled(false);
+				return await deliverAgentMessage(message, api, null, `🔒 AI turned OFF for regular users (Admins remain active).`, [], uid, threadID);
+			}
+			if (naturalTask.action === "block") {
+				const targetObj = await toolRegistry.findUserUid(naturalTask.target, event, api, threadsData, usersData);
+				if (!targetObj || !targetObj.uid) {
+					return await deliverAgentMessage(message, api, null, `⚠️ Specify a valid user UID, mention, or reply to block.`, [], uid, threadID);
+				}
+				if (targetObj.uid === toolRegistry.OWNER_UID) {
+					return await deliverAgentMessage(message, api, null, `⚠️ Cannot block the bot Owner.`, [], uid, threadID);
+				}
+				blockUser(targetObj.uid, "Blocked by Admin", uid);
+				return await deliverAgentMessage(message, api, null, `🚫 Blocked UID ${targetObj.uid} (${targetObj.name}) from using AI.`, [], uid, threadID);
+			}
+			if (naturalTask.action === "unblock") {
+				const targetObj = await toolRegistry.findUserUid(naturalTask.target, event, api, threadsData, usersData);
+				const targetUid = targetObj?.uid || naturalTask.target;
+				if (unblockUser(targetUid)) {
+					return await deliverAgentMessage(message, api, null, `✅ Unblocked UID ${targetUid} from AI.`, [], uid, threadID);
+				}
+				return await deliverAgentMessage(message, api, null, `⚠️ UID ${targetUid} is not in the blocked list.`, [], uid, threadID);
+			}
+			if (naturalTask.action === "status") {
+				const s = loadAiSettings();
+				const blockedCount = Object.keys(s.blockedUsers || {}).length;
+				return await deliverAgentMessage(message, api, null, `⚙️ AI Status\n────────────\n• Enabled for users: ${s.enabledForUsers ? "YES" : "NO"}\n• Blocked users: ${blockedCount}`, [], uid, threadID);
+			}
+		}
 		if (naturalTask.type === "immediate_tool") {
 			const startPerf = performance.now();
 			const toolResult = await toolRegistry.executeCommandAsTool({
@@ -1693,16 +1938,24 @@ async function handleQueenAgentTurn(options) {
 		? `\n[Replied Message: "${String(event.messageReply.body).slice(0, 500)}"]`
 		: "";
 
+	const extractedImage = extractImageUrlFromContext(event, rawPrompt);
+	let promptToUse = rawPrompt;
+	if (extractedImage && (!promptToUse || /^(?:what(?:\s+is)?(?:\s+this)?(?:\s+image)?|describe|see|look|check|image\s+recognition)/i.test(promptToUse))) {
+		promptToUse = "what is this image about short response no extra details";
+	}
+
 	const systemBanner =
 		`[QUEENBOT AI AGENTIC CORE]\n` +
 		`You are Queen Bot, an autonomous AI assistant powering QueenBotV3 on Facebook Messenger.\n` +
+		`CRITICAL: Give short, simple, direct answers with no extra details unless asked.\n` +
 		`When asked to run, trigger, or use a bot tool or command, always output <QUEEN_ACTION>{"action":"run_tool","command":"<command>","args":[...]}</QUEEN_ACTION>.\n` +
 		`Never state that you cannot execute commands, interact with messaging APIs, or monitor response times.`;
 
 	const compositePrompt = [
 		systemBanner,
+		extractedImage ? `[Attached Image URL: ${extractedImage}]\n[Image Task]: Describe what is in this image. Keep response short and simple with no extra details.` : "",
 		recentHistory ? `[Recent Chat Context]:\n${recentHistory}\n` : "",
-		`[User (${honorific}, UID: ${uid})]: ${rawPrompt}${replyContext}`
+		`[User (${honorific}, UID: ${uid})]: ${promptToUse}${replyContext}`
 	]
 		.filter(Boolean)
 		.join("\n");
@@ -1712,7 +1965,8 @@ async function handleQueenAgentTurn(options) {
 		prompt: compositePrompt,
 		uid,
 		model: activeModel,
-		system: systemInstruction
+		system: systemInstruction,
+		image: extractedImage
 	});
 
 	if (!apiRes.ok) {
@@ -1739,9 +1993,17 @@ async function handleQueenAgentTurn(options) {
 	const isCapabilityRefusal =
 		/(?:cannot|can't)\s+(?:execute|run|trigger|interact)\s+(?:custom\s+)?(?:bot\s+)?commands/i.test(rawResponse) ||
 		/interact with external messaging APIs/i.test(rawResponse) ||
-		/monitor live system response times/i.test(rawResponse);
+		/monitor live system response times/i.test(rawResponse) ||
+		/access to live Facebook/i.test(rawResponse) ||
+		/retrieve a user's Facebook UID/i.test(rawResponse);
 
 	if (isCapabilityRefusal) {
+		if (/(?:uid|whois)/i.test(rawPrompt)) {
+			const uidRes = await toolRegistry.findUserUid(rawPrompt, event, api, threadsData, usersData);
+			if (uidRes && uidRes.uid) {
+				return await deliverAgentMessage(message, api, thinking, `🆔 UID: ${uidRes.uid} (${uidRes.name})`, [], uid, threadID);
+			}
+		}
 		const extracted = extractSingleClauseStep(rawPrompt);
 		if (extracted && extracted.command) {
 			const startPerf = performance.now();
@@ -1786,7 +2048,7 @@ async function handleQueenAgentTurn(options) {
 }
 
 const QueenAIGlobalBridge = {
-	version: "9.0.0",
+	version: "9.1.0",
 	author: "Priyanshi Kaur",
 	ownerUid: toolRegistry.OWNER_UID,
 	platform: "QueenBotV3",
@@ -1802,6 +2064,17 @@ const QueenAIGlobalBridge = {
 	getAiMessageMeta,
 	restoreAllSchedules,
 	handleQueenAgentTurn,
+	loadAiSettings,
+	saveAiSettings,
+	isUserBlocked,
+	isAiEnabledForUser,
+	blockUser,
+	unblockUser,
+	setAiUsersEnabled,
+	extractImageUrlFromContext,
+	callMeowGeminiApi,
+	findUserUid: toolRegistry.findUserUid,
+	deleteBotScript: toolRegistry.deleteBotScript,
 	handleReplyFallback: async (context) => {
 		const { event } = context || {};
 		const userText = typeof event?.body === "string" ? event.body.trim() : "";

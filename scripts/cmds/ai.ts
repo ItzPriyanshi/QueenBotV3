@@ -696,15 +696,68 @@ module.exports = {
 		const { args, message, event, api, usersData, role } = context;
 		const rawPrompt = Array.isArray(args) ? args.join(" ").trim() : "";
 		const lower = rawPrompt.toLowerCase();
+		const uid = String(event?.senderID || "");
+
+		if (agent.isUserBlocked?.(uid)) {
+			return;
+		}
+
+		if (lower === "on") {
+			if (Number(role) < 1 && uid !== OWNER_UID) {
+				return await message.reply("⚠️ Only Admins can enable AI.");
+			}
+			agent.setAiUsersEnabled?.(true);
+			return await message.reply("✅ AI turned ON for all users.");
+		}
+
+		if (lower === "off") {
+			if (Number(role) < 1 && uid !== OWNER_UID) {
+				return await message.reply("⚠️ Only Admins can disable AI.");
+			}
+			agent.setAiUsersEnabled?.(false);
+			return await message.reply("🔒 AI turned OFF for regular users (Admins remain active).");
+		}
+
+		if (lower.startsWith("block")) {
+			if (Number(role) < 1 && uid !== OWNER_UID) {
+				return await message.reply("⚠️ Only Admins can block users from AI.");
+			}
+			const targetArg = rawPrompt.slice(5).trim();
+			const targetObj = agent.findUserUid ? await agent.findUserUid(targetArg, event, api, context.threadsData, usersData) : null;
+			if (!targetObj || !targetObj.uid) {
+				return await message.reply("⚠️ Specify a valid user UID, mention, or reply to block.");
+			}
+			if (targetObj.uid === OWNER_UID) {
+				return await message.reply("⚠️ Cannot block the bot Owner.");
+			}
+			agent.blockUser?.(targetObj.uid, "Blocked by Admin", uid);
+			return await message.reply(`🚫 Blocked UID ${targetObj.uid} (${targetObj.name}) from using AI.`);
+		}
+
+		if (lower.startsWith("unblock")) {
+			if (Number(role) < 1 && uid !== OWNER_UID) {
+				return await message.reply("⚠️ Only Admins can unblock users from AI.");
+			}
+			const targetArg = rawPrompt.slice(7).trim();
+			const targetObj = agent.findUserUid ? await agent.findUserUid(targetArg, event, api, context.threadsData, usersData) : null;
+			const targetUid = targetObj?.uid || targetArg;
+			if (agent.unblockUser?.(targetUid)) {
+				return await message.reply(`✅ Unblocked UID ${targetUid} from AI.`);
+			}
+			return await message.reply(`⚠️ UID ${targetUid} is not in the blocked list.`);
+		}
 
 		if (lower === "vault" || lower === "status") {
 			const vault = loadEncryptedTrainData();
 			const identity = await agent.resolveUserIdentity({ api, usersData, senderID: event?.senderID, role });
 			const toolsList = agent.syncTools ? agent.syncTools() : [];
+			const settings = agent.loadAiSettings ? agent.loadAiSettings() : { enabledForUsers: true, blockedUsers: {} };
 			return await message.reply(
 				`👑 Queen Bot • Neural Vault Status\n` +
 				`────────────\n` +
 				`• User: ${identity.name}${identity.isOwner ? " (Supreme Queen / Owner / Boss)" : ""}\n` +
+				`• AI Enabled For Users: ${settings.enabledForUsers ? "YES" : "NO"}\n` +
+				`• Blocked Users: ${Object.keys(settings.blockedUsers || {}).length}\n` +
 				`• Vault Header: ${VAULT_HEADER}\n` +
 				`• Cipher: ${vault.metadata?.vaultEncryption || "PBKDF2-SHA512+AES-256-CTR"}\n` +
 				`• Endpoint: ${vault.apiConfig?.fullEndpoint || ["https:", "", "meow-dl.onrender.com", "g"].join("/")}\n` +
@@ -721,11 +774,15 @@ module.exports = {
 				`────────────\n` +
 				`${preview || "All GoatBot commands active"}${toolsList.length > 35 ? ` ...and ${toolsList.length - 35} more` : ""}\n` +
 				`────────────\n` +
-				`• Plus 22 independent FCA APIs & 5 Admin Script Tools`
+				`• Plus 22 independent FCA APIs & 6 Admin Script Tools`
 			);
 		}
 
-		await agent.handleQueenAgentTurn({ ...context, prompt: rawPrompt });
+		if (agent.isAiEnabledForUser && !agent.isAiEnabledForUser(uid, role)) {
+			return await message.reply("⚠️ AI is currently disabled for regular users by admin.");
+		}
+
+		await agent.handleQueenAgentTurn({ ...context, prompt: rawPrompt, isDirectCommand: true });
 	},
 
 	onChat: async function (context) {
@@ -735,20 +792,28 @@ module.exports = {
 		const body = event.body.trim();
 		if (!body) return;
 
+		const agent = getStandaloneAgent();
+		const uid = String(event.senderID || "");
+		if (agent.isUserBlocked?.(uid)) return;
+		if (agent.isAiEnabledForUser && !agent.isAiEnabledForUser(uid, 0)) return;
+
 		const { usedPrefix, prompt } = normalizeCommand(body);
 		if (!usedPrefix) return;
 
-		const agent = getStandaloneAgent();
-		await agent.handleQueenAgentTurn({ ...context, prompt });
+		await agent.handleQueenAgentTurn({ ...context, prompt, isDirectCommand: false });
 	},
 
 	onReply: async function (context) {
 		const { event, Reply } = context;
 		if (!event) return;
 		const agent = getStandaloneAgent();
+		const uid = String(event.senderID || "");
+		if (agent.isUserBlocked?.(uid)) return;
+		if (agent.isAiEnabledForUser && !agent.isAiEnabledForUser(uid, 0)) return;
+
 		const meta = agent.getAiMessageMeta ? agent.getAiMessageMeta(event?.messageReply?.messageID) : null;
 		const replyAuthor = Reply?.author || meta?.author;
-		if (replyAuthor && String(event.senderID) !== String(replyAuthor) && String(event.senderID) !== OWNER_UID) {
+		if (replyAuthor && uid !== String(replyAuthor) && uid !== OWNER_UID) {
 			return;
 		}
 		const userText = typeof event.body === "string"
@@ -758,6 +823,6 @@ module.exports = {
 				: "";
 		if (!userText && (!event.attachments || event.attachments.length === 0)) return;
 
-		await agent.handleQueenAgentTurn({ ...context, prompt: userText });
+		await agent.handleQueenAgentTurn({ ...context, prompt: userText, isDirectCommand: false });
 	}
 };

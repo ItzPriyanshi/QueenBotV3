@@ -530,12 +530,13 @@ function resolveToolName(rawName) {
 	const builtInSynonyms = {
 		up2: "uptime2",
 		up: "uptime",
-		yt: "ytb",
-		youtube: "ytb",
-		song: "ytb",
-		music: "ytb",
-		play: "ytb",
-		sing: "ytb",
+		yt: "sing",
+		youtube: "sing",
+		song: "sing",
+		music: "sing",
+		play: "sing",
+		sing: "sing",
+		spotify: "sing",
 		spy: "getinfo",
 		userinfo: "getinfo",
 		whois: "getinfo",
@@ -736,11 +737,16 @@ async function executeCommandAsTool(options) {
 		return { messageID: `virtual_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` };
 	};
 
+	let lastEditedText = "";
 	const proxyMessage = Object.create(message || {});
 	proxyMessage.reply = async (form) => captureHandler(form, !captureOutput);
 	proxyMessage.send = async (form) => captureHandler(form, !captureOutput);
 	proxyMessage.edit = async (text, msgID) => {
-		if (typeof text === "string") capturedTexts.push(text);
+		const textContent = typeof text === "string" ? text : (text?.body || "");
+		if (textContent) {
+			capturedTexts.push(textContent);
+			lastEditedText = textContent;
+		}
 		if (!captureOutput && message && typeof message.edit === "function") {
 			return await message.edit(text, msgID);
 		}
@@ -759,6 +765,20 @@ async function executeCommandAsTool(options) {
 		return null;
 	};
 
+	const proxyApi = Object.create(api || {});
+	proxyApi.sendMessage = async (form, threadID) => captureHandler(form, !captureOutput);
+	proxyApi.editMessage = async (text, msgID) => {
+		const textContent = typeof text === "string" ? text : (text?.body || "");
+		if (textContent) {
+			capturedTexts.push(textContent);
+			lastEditedText = textContent;
+		}
+		if (!captureOutput && api && typeof api.editMessage === "function") {
+			return await api.editMessage(text, msgID);
+		}
+		return { messageID: msgID || `virtual_edit_${Date.now()}` };
+	};
+
 	const cleanArgs = Array.isArray(args) ? args.map(a => String(a)) : [];
 	const langCode = global.GoatBot?.config?.language || "en";
 	const getLang = createGetTextForCommand(targetCmd, prefix, langCode);
@@ -770,7 +790,7 @@ async function executeCommandAsTool(options) {
 
 	try {
 		await targetCmd.onStart({
-			api,
+			api: proxyApi,
 			message: proxyMessage,
 			event: syntheticEvent,
 			args: cleanArgs,
@@ -788,21 +808,25 @@ async function executeCommandAsTool(options) {
 			prefix
 		});
 
+		const finalText = lastEditedText || (capturedTexts.length ? capturedTexts[capturedTexts.length - 1] : capturedTexts.join("\n\n").trim());
 		return {
 			ok: true,
 			commandName: canonical,
-			capturedText: capturedTexts.join("\n\n").trim(),
+			capturedText: finalText,
 			attachments: capturedAttachments,
+			allOutputs: capturedTexts,
 			lastSentResult
 		};
 	}
 	catch (err) {
+		const solution = suggestGitHubSolution(canonical, err);
 		return {
 			ok: false,
 			commandName: canonical,
 			error: err?.message || String(err),
-			capturedText: capturedTexts.join("\n\n").trim(),
-			attachments: capturedAttachments
+			capturedText: lastEditedText || capturedTexts.join("\n\n").trim(),
+			attachments: capturedAttachments,
+			githubSolution: solution
 		};
 	}
 }
@@ -1070,6 +1094,206 @@ async function writeAndReloadBotScript({ targetName, code, runtimeContext = {} }
 	}
 }
 
+async function deleteBotScript(targetName, runtimeContext = {}) {
+	const filePath = resolveScriptPath(targetName);
+	if (!filePath || !fs.existsSync(filePath)) {
+		return { ok: false, error: `Script "${targetName}" does not exist.` };
+	}
+
+	const fileName = path.basename(filePath);
+	const stem = fileName.replace(/\.(js|ts)$/i, "").toLowerCase();
+
+	try {
+		if (global.GoatBot) {
+			if (global.GoatBot.commands instanceof Map) {
+				global.GoatBot.commands.delete(stem);
+			}
+			if (global.GoatBot.aliases instanceof Map) {
+				for (const [alias, target] of global.GoatBot.aliases.entries()) {
+					if (String(target).toLowerCase() === stem) {
+						global.GoatBot.aliases.delete(alias);
+					}
+				}
+			}
+			if (Array.isArray(global.GoatBot.onChat)) {
+				global.GoatBot.onChat = global.GoatBot.onChat.filter(c => c !== stem);
+			}
+			if (Array.isArray(global.GoatBot.onAnyEvent)) {
+				global.GoatBot.onAnyEvent = global.GoatBot.onAnyEvent.filter(c => c !== stem);
+			}
+		}
+
+		try {
+			delete require.cache[require.resolve(filePath)];
+		}
+		catch {}
+		delete require.cache[filePath];
+
+		const trashDir = path.join(getCmdsDirectory(), "cache", "trash");
+		fs.ensureDirSync(trashDir);
+		const trashPath = path.join(trashDir, `${fileName}.${Date.now()}.deleted`);
+		fs.copyFileSync(filePath, trashPath);
+		fs.unlinkSync(filePath);
+
+		syncCommandTools();
+
+		return {
+			ok: true,
+			fileName,
+			deleted: true,
+			trashBackup: path.basename(trashPath)
+		};
+	}
+	catch (err) {
+		return { ok: false, error: err?.message || String(err) };
+	}
+}
+
+function suggestGitHubSolution(commandName, err) {
+	const errStr = String(err?.stack || err?.message || err || "").toLowerCase();
+	const cmd = String(commandName || "").toLowerCase();
+
+	if (errStr.includes("1357001") || errStr.includes("login_blocked") || errStr.includes("expired") || errStr.includes("cookie")) {
+		return {
+			issue: "Facebook session cookie invalid or expired (error 1357001 / login_blocked).",
+			fix: "Export fresh appState / cookies from your browser and paste into account.txt.",
+			repo: "https://github.com/ItzPriyanshi/QueenBotV2",
+			githubRef: "fca-nx authentication & session renewal documentation"
+		};
+	}
+
+	if (errStr.includes("cannot find module") || errStr.includes("module_not_found")) {
+		const pkgMatch = errStr.match(/cannot find module '([^']+)'/i);
+		const pkg = pkgMatch ? pkgMatch[1] : "dependency";
+		return {
+			issue: `Missing package: ${pkg}`,
+			fix: `Install with: bun add ${pkg} or npm install ${pkg}`,
+			repo: "https://github.com/ItzPriyanshi/QueenBotV3",
+			githubRef: "QueenBot package.json dependencies"
+		};
+	}
+
+	if (errStr.includes("eaddrinuse") || errStr.includes("port")) {
+		return {
+			issue: "Dashboard or Elysia port already bound by another process.",
+			fix: "The port escalates automatically (3001 -> 3002+), or kill existing process with npx kill-port 3001.",
+			repo: "https://github.com/ItzPriyanshi/QueenBotV3",
+			githubRef: "dashboard port collision auto-escalation"
+		};
+	}
+
+	if (errStr.includes("canvas") || errStr.includes("node-gyp") || errStr.includes("cairo")) {
+		return {
+			issue: "Native C++ node-canvas compilation failure.",
+			fix: "Use QueenBot's built-in @napi-rs/canvas adapter bridge in bot/canvasAdapter.js.",
+			repo: "https://github.com/ItzPriyanshi/QueenBotV3",
+			githubRef: "@napi-rs/canvas zero-build compatibility bridge"
+		};
+	}
+
+	if (cmd === "spotify" || errStr.includes("spotify")) {
+		return {
+			issue: "Spotify API client credentials missing or unauthorized.",
+			fix: "Use .sing <song name> or .ytb <query> which streams high-bitrate audio directly without Spotify API keys.",
+			repo: "https://github.com/ItzPriyanshi/QueenBotV3",
+			githubRef: "scripts/cmds/sing.ts YouTube & iTunes resolver"
+		};
+	}
+
+	if (errStr.includes("rate limit") || errStr.includes("429") || errStr.includes("too many requests")) {
+		return {
+			issue: "Temporary API rate limit from upstream gateway.",
+			fix: "Add exponential backoff delay or rotate proxy headers.",
+			repo: "https://github.com/ItzPriyanshi/QueenBotV2",
+			githubRef: "FCA-NX autoReconnect & backoff listener"
+		};
+	}
+
+	return {
+		issue: `Runtime execution error in command "${cmd}": ${err?.message || errStr.slice(0, 120)}`,
+		fix: "Check parameter types, ensure dependencies exist, or inspect the script source.",
+		repo: "https://github.com/ItzPriyanshi/QueenBotV3",
+		githubRef: `scripts/cmds/${cmd}.ts`
+	};
+}
+
+async function findUserUid(input, event = {}, api = null, threadsData = null, usersData = null) {
+	if (event?.messageReply?.senderID) {
+		const uid = String(event.messageReply.senderID);
+		let name = "";
+		if (usersData?.getName) {
+			try { name = await usersData.getName(uid); } catch {}
+		}
+		return { uid, name: name || "User", source: "reply" };
+	}
+
+	if (event?.mentions && Object.keys(event.mentions).length > 0) {
+		const uid = Object.keys(event.mentions)[0];
+		const name = String(event.mentions[uid] || "").replace(/^@/, "").trim();
+		return { uid, name: name || "Mentioned User", source: "mention" };
+	}
+
+	const str = String(input || "").trim();
+	if (/^\d{8,20}$/.test(str)) {
+		let name = "";
+		if (usersData?.getName) {
+			try { name = await usersData.getName(str); } catch {}
+		}
+		return { uid: str, name: name || "User", source: "direct_uid" };
+	}
+
+	if (/^(https?:\/\/)?(www\.)?(facebook\.com|fb\.com|fb\.watch)/i.test(str)) {
+		if (global.utils?.findUid) {
+			try {
+				const uid = await global.utils.findUid(str);
+				if (uid) return { uid: String(uid), name: "Profile Link", source: "link" };
+			}
+			catch {}
+		}
+	}
+
+	if (str && event?.threadID && threadsData?.get) {
+		try {
+			const threadInfo = await threadsData.get(event.threadID);
+			const members = threadInfo?.members || threadInfo?.userInfo || [];
+			const cleanQuery = str.toLowerCase().replace(/^@/, "");
+			const found = members.find(m => {
+				const mName = String(m.name || "").toLowerCase();
+				return mName === cleanQuery || mName.includes(cleanQuery);
+			});
+			if (found && (found.id || found.userID)) {
+				return { uid: String(found.id || found.userID), name: found.name || str, source: "thread_member" };
+			}
+		}
+		catch {}
+	}
+
+	if (str && api && typeof api.getUserID === "function") {
+		try {
+			const res = await new Promise((resolve) => {
+				api.getUserID(str.replace(/^@/, ""), (err, data) => {
+					if (err || !data || !data.length) return resolve(null);
+					resolve(data[0]);
+				});
+			});
+			if (res && res.userID) {
+				return { uid: String(res.userID), name: res.name || str, source: "fca_search" };
+			}
+		}
+		catch {}
+	}
+
+	if (event?.senderID) {
+		let name = "";
+		if (usersData?.getName) {
+			try { name = await usersData.getName(event.senderID); } catch {}
+		}
+		return { uid: String(event.senderID), name: name || "Yourself", source: "self" };
+	}
+
+	return null;
+}
+
 module.exports = {
 	OWNER_UID,
 	OWNER_NAME,
@@ -1090,5 +1314,8 @@ module.exports = {
 	stripCommentsFromCode,
 	readBotScript,
 	reloadBotScript,
-	writeAndReloadBotScript
+	writeAndReloadBotScript,
+	deleteBotScript,
+	suggestGitHubSolution,
+	findUserUid
 };
