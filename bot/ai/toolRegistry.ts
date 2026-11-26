@@ -1217,6 +1217,16 @@ function suggestGitHubSolution(commandName, err) {
 	};
 }
 
+function cleanPersonQuery(raw) {
+	let s = String(raw || "").trim();
+	s = s.replace(/^(?:lex|queen|ai|bot|hey)\s*,?\s*/i, "");
+	s = s.replace(/^(?:can\s+you\s+)?(?:please\s+)?(?:give\s+(?:me\s+)?|get\s+|show\s+|fetch\s+|tell\s+me\s+)?(?:about\s+|details\s+(?:of|for|about)\s+|info\s+(?:of|on|about)\s+|userinfo\s+(?:of|for)\s+|profile\s+(?:of|for)\s+|who\s+is\s+|who's\s+|whos\s+|who\s+was\s+|check\s+)/i, "");
+	s = s.replace(/\s+(?:in\s+this\s+group|in\s+the\s+group|in\s+group|here|in\s+chat)\??$/i, "");
+	s = s.replace(/[\?\.!:]+$/, "");
+	s = s.replace(/^@/, "").trim();
+	return s;
+}
+
 async function findUserUid(input, event = {}, api = null, threadsData = null, usersData = null) {
 	if (event?.messageReply?.senderID) {
 		const uid = String(event.messageReply.senderID);
@@ -1233,57 +1243,83 @@ async function findUserUid(input, event = {}, api = null, threadsData = null, us
 		return { uid, name: name || "Mentioned User", source: "mention" };
 	}
 
-	const str = String(input || "").trim();
-	if (/^\d{8,20}$/.test(str)) {
-		let name = "";
-		if (usersData?.getName) {
-			try { name = await usersData.getName(str); } catch {}
-		}
-		return { uid: str, name: name || "User", source: "direct_uid" };
-	}
+	const cleaned = cleanPersonQuery(input);
+	const rawStr = String(input || "").trim();
+	const candidates = [cleaned, rawStr].filter(Boolean);
 
-	if (/^(https?:\/\/)?(www\.)?(facebook\.com|fb\.com|fb\.watch)/i.test(str)) {
-		if (global.utils?.findUid) {
-			try {
-				const uid = await global.utils.findUid(str);
-				if (uid) return { uid: String(uid), name: "Profile Link", source: "link" };
+	for (const str of candidates) {
+		if (/^\d{8,20}$/.test(str)) {
+			let name = "";
+			if (usersData?.getName) {
+				try { name = await usersData.getName(str); } catch {}
 			}
-			catch {}
+			return { uid: str, name: name || "User", source: "direct_uid" };
+		}
+
+		if (/^(https?:\/\/)?(www\.)?(facebook\.com|fb\.com|fb\.watch)/i.test(str)) {
+			if (global.utils?.findUid) {
+				try {
+					const uid = await global.utils.findUid(str);
+					if (uid) return { uid: String(uid), name: "Profile Link", source: "link" };
+				}
+				catch {}
+			}
 		}
 	}
 
-	if (str && event?.threadID && threadsData?.get) {
+	const cleanQuery = (cleaned || rawStr).toLowerCase().replace(/^@/, "").trim();
+
+	if (cleanQuery && event?.threadID && threadsData?.get) {
 		try {
 			const threadInfo = await threadsData.get(event.threadID);
 			const members = threadInfo?.members || threadInfo?.userInfo || [];
-			const cleanQuery = str.toLowerCase().replace(/^@/, "");
-			const found = members.find(m => {
+			let found = members.find(m => {
 				const mName = String(m.name || "").toLowerCase();
-				return mName === cleanQuery || mName.includes(cleanQuery);
+				const mNick = String(m.nickname || threadInfo?.nicknames?.[m.userID || m.id] || "").toLowerCase();
+				return mName === cleanQuery || mNick === cleanQuery;
 			});
+			if (!found) {
+				found = members.find(m => {
+					const mName = String(m.name || "").toLowerCase();
+					const mNick = String(m.nickname || threadInfo?.nicknames?.[m.userID || m.id] || "").toLowerCase();
+					return mName.includes(cleanQuery) || cleanQuery.includes(mName) || mNick.includes(cleanQuery);
+				});
+			}
 			if (found && (found.id || found.userID)) {
-				return { uid: String(found.id || found.userID), name: found.name || str, source: "thread_member" };
+				return { uid: String(found.id || found.userID), name: found.name || cleanQuery, source: "thread_member" };
 			}
 		}
 		catch {}
 	}
 
-	if (str && api && typeof api.getUserID === "function") {
+	if (cleanQuery && usersData?.getAll) {
+		try {
+			const allUsers = await usersData.getAll();
+			const found = allUsers.find(u => (u.name || "").toLowerCase() === cleanQuery) ||
+				allUsers.find(u => (u.name || "").toLowerCase().includes(cleanQuery) || cleanQuery.includes((u.name || "").toLowerCase()));
+			if (found && (found.userID || found.id)) {
+				return { uid: String(found.userID || found.id), name: found.name || cleanQuery, source: "bot_users" };
+			}
+		}
+		catch {}
+	}
+
+	if (cleanQuery && api && typeof api.getUserID === "function") {
 		try {
 			const res = await new Promise((resolve) => {
-				api.getUserID(str.replace(/^@/, ""), (err, data) => {
+				api.getUserID(cleanQuery, (err, data) => {
 					if (err || !data || !data.length) return resolve(null);
 					resolve(data[0]);
 				});
 			});
 			if (res && res.userID) {
-				return { uid: String(res.userID), name: res.name || str, source: "fca_search" };
+				return { uid: String(res.userID), name: res.name || cleanQuery, source: "fca_search" };
 			}
 		}
 		catch {}
 	}
 
-	if (event?.senderID) {
+	if (/(?:who\s+am\s+i|my\s+details|about\s+me|my\s+uid)/i.test(rawStr) && event?.senderID) {
 		let name = "";
 		if (usersData?.getName) {
 			try { name = await usersData.getName(event.senderID); } catch {}
@@ -1292,6 +1328,103 @@ async function findUserUid(input, event = {}, api = null, threadsData = null, us
 	}
 
 	return null;
+}
+
+async function getUserDetailsCard({ query, event = {}, api = null, threadsData = null, usersData = null }) {
+	const userMatch = await findUserUid(query, event, api, threadsData, usersData);
+	if (!userMatch || !userMatch.uid) {
+		return null;
+	}
+
+	const uid = String(userMatch.uid);
+	let name = userMatch.name || "User";
+	let genderStr = "Not specified";
+	let friendStatus = "No";
+	let verifiedStr = "Standard";
+	let thumbSrc = "";
+	let vanity = "";
+
+	if (api && typeof api.getUserInfo === "function") {
+		try {
+			const info = await api.getUserInfo(uid);
+			const u = info?.[uid];
+			if (u) {
+				if (u.name) name = u.name;
+				genderStr = u.gender === 1 ? "Female" : u.gender === 2 ? "Male" : "Not specified";
+				friendStatus = u.isFriend ? "Yes" : "No";
+				verifiedStr = u.verified ? "Verified ✓" : "Standard";
+				thumbSrc = u.thumbSrc || "";
+				vanity = u.vanity || "";
+			}
+		}
+		catch {}
+	}
+
+	let inGroup = false;
+	let groupRole = "Member";
+	let nickname = "None";
+	let messageCount = 0;
+	let joinDate = "Unknown";
+
+	if (event?.threadID && threadsData?.get) {
+		try {
+			const threadData = await threadsData.get(event.threadID);
+			if (threadData) {
+				const members = Array.isArray(threadData.members) ? threadData.members : [];
+				const memberData = members.find(m => String(m.userID || m.id) === uid);
+				if (memberData) {
+					inGroup = true;
+					messageCount = memberData.messageCount || 0;
+					if (memberData.joinedAt) {
+						joinDate = new Date(memberData.joinedAt).toLocaleDateString();
+					}
+				}
+				const adminList = Array.isArray(threadData.adminIDs) ? threadData.adminIDs : [];
+				const isAdmin = adminList.some(a => String(a.id || a.userID || a) === uid);
+				if (isAdmin) groupRole = "Admin 🛡️";
+				if (threadData.nicknames && threadData.nicknames[uid]) {
+					nickname = threadData.nicknames[uid];
+				}
+				else if (memberData?.nickname) {
+					nickname = memberData.nickname;
+				}
+			}
+		}
+		catch {}
+	}
+
+	let avatarStream = null;
+	if (thumbSrc) {
+		try {
+			const imgRes = await axios.get(thumbSrc, { responseType: "stream", timeout: 8000 });
+			avatarStream = imgRes.data;
+		}
+		catch {}
+	}
+
+	const profileUrl = vanity ? `https://facebook.com/${vanity}` : `https://facebook.com/${uid}`;
+	const lines = [
+		`👤 User Details`,
+		`────────────`,
+		`• Name: ${name}`,
+		`• UID: ${uid}`,
+		inGroup ? `• Group Role: ${groupRole}` : null,
+		inGroup && nickname !== "None" ? `• Nickname: ${nickname}` : null,
+		inGroup && messageCount > 0 ? `• Messages Sent: ${messageCount}` : null,
+		inGroup && joinDate !== "Unknown" ? `• Joined Group: ${joinDate}` : null,
+		`• Gender: ${genderStr}`,
+		`• Friend: ${friendStatus}`,
+		`• Profile: ${profileUrl}`
+	].filter(Boolean);
+
+	return {
+		ok: true,
+		uid,
+		name,
+		body: lines.join("\n"),
+		attachment: avatarStream,
+		profileUrl
+	};
 }
 
 module.exports = {
@@ -1317,5 +1450,7 @@ module.exports = {
 	writeAndReloadBotScript,
 	deleteBotScript,
 	suggestGitHubSolution,
-	findUserUid
+	cleanPersonQuery,
+	findUserUid,
+	getUserDetailsCard
 };

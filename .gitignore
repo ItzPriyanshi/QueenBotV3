@@ -28,6 +28,9 @@ database/data/database.sqlite
 *.sqlite
 *.db
 *.sqlite3
+*ai_history.json
+*ai_schedules.json
+*ai_response_rules.json
 
 # Temporary assets and downloads
 scripts/cmds/tmp/*

@@ -2,6 +2,7 @@ const fs = require("fs-extra");
 const path = require("path");
 const axios = require("axios");
 const https = require("https");
+const zlib = require("zlib");
 let toolRegistry: any;
 try {
 	toolRegistry = require("./toolRegistry");
@@ -149,9 +150,34 @@ function writeJsonSafe(filePath, data) {
 	}
 }
 
+function compressTurns(turnsArray) {
+	if (!Array.isArray(turnsArray) || turnsArray.length === 0) return "";
+	try {
+		const json = JSON.stringify(turnsArray);
+		const compressed = zlib.deflateRawSync(Buffer.from(json, "utf8"), { level: 9 });
+		return compressed.toString("base64");
+	}
+	catch {
+		return "";
+	}
+}
+
+function decompressTurns(base64Str) {
+	if (!base64Str || typeof base64Str !== "string") return [];
+	try {
+		const buf = Buffer.from(base64Str, "base64");
+		const decompressed = zlib.inflateRawSync(buf);
+		return JSON.parse(decompressed.toString("utf8")) || [];
+	}
+	catch {
+		return [];
+	}
+}
+
 function loadHistoryStore() {
-	const store = readJsonSafe(HISTORY_FILE, { users: {}, aiMessages: {}, threadSettings: {} });
+	const store = readJsonSafe(HISTORY_FILE, { users: {}, threads: {}, aiMessages: {}, threadSettings: {} });
 	if (!store.users || typeof store.users !== "object") store.users = {};
+	if (!store.threads || typeof store.threads !== "object") store.threads = {};
 	if (!store.aiMessages || typeof store.aiMessages !== "object") store.aiMessages = {};
 	if (!store.threadSettings || typeof store.threadSettings !== "object") store.threadSettings = {};
 	return store;
@@ -196,40 +222,104 @@ function setUserModelPreference(uid, model) {
 	writeJsonSafe(HISTORY_FILE, store);
 }
 
-function appendUserHistoryTurn(uid, userPrompt, assistantReply) {
+function appendChatHistoryTurn({ threadID, uid, name = "Member", userPrompt, assistantReply, isGroup = false }) {
 	const store = loadHistoryStore();
-	const key = String(uid);
-	if (!store.users[key] || typeof store.users[key] !== "object" || Array.isArray(store.users[key])) {
-		store.users[key] = { turns: [], model: "gemini-auto" };
+	const userKey = String(uid || "unknown");
+	if (!store.users[userKey] || typeof store.users[userKey] !== "object") {
+		store.users[userKey] = { turns: [], model: "gemini-auto" };
 	}
-	if (!Array.isArray(store.users[key].turns)) {
-		store.users[key].turns = [];
+	if (!Array.isArray(store.users[userKey].turns)) {
+		store.users[userKey].turns = [];
 	}
-	store.users[key].turns.push({
-		user: String(userPrompt || "").slice(0, 1200),
-		assistant: String(assistantReply || "").slice(0, 1600),
+	store.users[userKey].turns.push({
+		user: String(userPrompt || "").slice(0, 1000),
+		assistant: String(assistantReply || "").slice(0, 1200),
 		ts: Date.now()
 	});
-	store.users[key].turns = store.users[key].turns.slice(-12);
+	store.users[userKey].turns = store.users[userKey].turns.slice(-8);
+
+	if (threadID) {
+		const threadKey = String(threadID);
+		if (!store.threads[threadKey] || typeof store.threads[threadKey] !== "object") {
+			store.threads[threadKey] = {
+				activeTurns: [],
+				compressedHistory: "",
+				updatedAt: Date.now()
+			};
+		}
+		const threadObj = store.threads[threadKey];
+		if (!Array.isArray(threadObj.activeTurns)) {
+			threadObj.activeTurns = [];
+		}
+		threadObj.activeTurns.push({
+			senderID: String(uid || ""),
+			name: String(name || "Member").slice(0, 50),
+			user: String(userPrompt || "").slice(0, 1000),
+			assistant: String(assistantReply || "").slice(0, 1200),
+			ts: Date.now()
+		});
+
+		if (threadObj.activeTurns.length >= 6) {
+			const existingOlder = decompressTurns(threadObj.compressedHistory);
+			const toCompress = [...existingOlder, ...threadObj.activeTurns.slice(0, -3)].slice(-25);
+			threadObj.compressedHistory = compressTurns(toCompress);
+			threadObj.activeTurns = threadObj.activeTurns.slice(-3);
+		}
+		threadObj.updatedAt = Date.now();
+	}
+
 	writeJsonSafe(HISTORY_FILE, store);
 }
 
-function getRecentHistoryContext(uid, maxTokens = 900) {
+function appendUserHistoryTurn(uid, userPrompt, assistantReply) {
+	appendChatHistoryTurn({ threadID: null, uid, name: "User", userPrompt, assistantReply, isGroup: false });
+}
+
+function getRecentHistoryContext(options, maxTokens = 900) {
+	const { threadID, uid, isGroup = false } = typeof options === "object" && options !== null
+		? options
+		: { threadID: null, uid: String(options || ""), isGroup: false };
+
+	const effectiveMax = typeof maxTokens === "number" ? maxTokens : 900;
 	const store = loadHistoryStore();
+
+	if (isGroup && threadID) {
+		const threadKey = String(threadID);
+		const threadObj = store.threads[threadKey];
+		if (threadObj) {
+			const older = decompressTurns(threadObj.compressedHistory);
+			const active = Array.isArray(threadObj.activeTurns) ? threadObj.activeTurns : [];
+			const allTurns = [...older, ...active].slice(-8);
+			if (allTurns.length > 0) {
+				const formatted = allTurns
+					.map(t => `${t.name || "Member"}: ${t.user}\nQueen Bot: ${t.assistant}`)
+					.join("\n\n");
+				return toolRegistry.truncateToTokenBudget(formatted, effectiveMax);
+			}
+		}
+	}
+
 	const turns = store.users[String(uid)]?.turns;
 	if (!Array.isArray(turns) || turns.length === 0) return "";
 	const formatted = turns
-		.slice(-6)
+		.slice(-5)
 		.map(t => `User: ${t.user}\nQueen Bot: ${t.assistant}`)
 		.join("\n\n");
-	return toolRegistry.truncateToTokenBudget(formatted, maxTokens);
+	return toolRegistry.truncateToTokenBudget(formatted, effectiveMax);
 }
 
-function clearLocalHistory(uid) {
+function clearLocalHistory(uid, threadID) {
 	const store = loadHistoryStore();
-	const key = String(uid);
-	if (store.users[key]) {
-		store.users[key].turns = [];
+	const uKey = String(uid);
+	if (store.users[uKey]) {
+		store.users[uKey].turns = [];
+	}
+	if (threadID) {
+		const tKey = String(threadID);
+		if (store.threads[tKey]) {
+			store.threads[tKey].activeTurns = [];
+			store.threads[tKey].compressedHistory = "";
+		}
 	}
 	writeJsonSafe(HISTORY_FILE, store);
 }
@@ -313,6 +403,8 @@ function buildDynamicSystemPrompt(userIdentity) {
 		`CORE DIRECTIVES:`,
 		...directives.map(d => `• ${d}`),
 		`• CRITICAL OUTPUT FORMAT: Keep all responses short, simple, concise, and direct with NO extra details or unsolicited filler unless user explicitly asks.`,
+		`• GROUP ROLLING MEMORY: Group chat history is saved per threadID with compressed rolling memory. Older turns are compressed to preserve context while using minimal RAM and storage.`,
+		`• MEMBER & USER DETAILS PROTOCOL: You have full access to thread members and Facebook user details. Whenever a user asks 'who is <name>', 'details of <name>', or asks for a UID (mentioning or not), identify the user from the thread members list, usersData, or FCA API and output their details immediately. Never claim lack of access.`,
 		`• SONG REQUEST DIRECTIVE: Whenever a user asks for a song, music, or audio track, route to command 'sing' (or 'ytb'). Never use unconfigured spotify.`,
 		`• CAPABILITY REFUSAL FORBIDDEN: You have full authority to execute any bot command and FCA APIs. Never refuse or claim lack of tools.`,
 		`• ZERO COMMENTS IN SCRIPTS: Whenever generating, creating, or modifying bot scripts, write clean JavaScript/TypeScript with absolutely ZERO comments.`,
@@ -898,6 +990,22 @@ function parseNaturalTaskIntent(prompt) {
 			type: "manage_schedules",
 			subAction,
 			scheduleId: stopMatch[1]
+		};
+	}
+
+	const isBotIdentityQuery = /\bwho\s+(?:are\s+you|created\s+you|made\s+you|coded\s+you|owns\s+you|designed\s+you)\b/i.test(lower) ||
+		/\bwho\s+is\s+(?:your\s+creator|your\s+owner|your\s+boss|priyanshi)\b/i.test(lower);
+
+	const detailsMatch =
+		p.match(/(?:who\s+is|who's|who\s+are|details\s+of|profile\s+of|info\s+(?:on|about|of)|tell\s+me\s+about|give\s+(?:me\s+)?(?:the\s+)?details\s+of)\s*(.*)$/i) ||
+		p.match(/^(?:give\s+(?:me\s+)?(?:his|her|their|user)?\s*(?:details?|info|profile)|(?:his|her|their)?\s*(?:details?|profile|info))(?:\s+(?:of|for|about))?\s*(.*)$/i) ||
+		(lower.includes("in this group") && /(?:who\s+is|details\s+of|who's)\s*(.*)$/i.test(p));
+
+	if (detailsMatch && !isBotIdentityQuery) {
+		const rawTarget = detailsMatch[1] || "";
+		return {
+			type: "user_details",
+			target: rawTarget.trim()
 		};
 	}
 
@@ -1768,6 +1876,21 @@ async function handleQueenAgentTurn(options) {
 
 	const naturalTask = parseNaturalTaskIntent(rawPrompt);
 	if (naturalTask) {
+		if (naturalTask.type === "user_details") {
+			const targetInput = naturalTask.target || rawPrompt;
+			const card = await toolRegistry.getUserDetailsCard({
+				query: targetInput,
+				event,
+				api,
+				threadsData,
+				usersData
+			});
+			if (card && card.ok && card.body) {
+				const attachments = card.attachment ? [card.attachment] : [];
+				return await deliverAgentMessage(message, api, null, card.body, attachments, uid, threadID);
+			}
+			return await deliverAgentMessage(message, api, null, `⚠️ Could not find details for that user.`, [], uid, threadID);
+		}
 		if (naturalTask.type === "resolve_uid") {
 			const targetInput = naturalTask.target || rawPrompt;
 			const uidRes = await toolRegistry.findUserUid(targetInput, event, api, threadsData, usersData);
@@ -1933,7 +2056,8 @@ async function handleQueenAgentTurn(options) {
 	}
 
 	const systemInstruction = buildDynamicSystemPrompt(userIdentity);
-	const recentHistory = getRecentHistoryContext(uid, 700);
+	const isGroup = Boolean(event?.isGroup);
+	const recentHistory = getRecentHistoryContext({ threadID, uid, isGroup }, 700);
 	const replyContext = event?.messageReply?.body
 		? `\n[Replied Message: "${String(event.messageReply.body).slice(0, 500)}"]`
 		: "";
@@ -1986,7 +2110,7 @@ async function handleQueenAgentTurn(options) {
 
 	if (parsedActions.length > 0) {
 		await executeParsedQueenActions(parsedActions, options, userIdentity, thinking);
-		appendUserHistoryTurn(uid, rawPrompt, `[Executed Actions: ${parsedActions.map(a => a.action).join(", ")}]`);
+		appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", userPrompt: rawPrompt, assistantReply: `[Executed Actions: ${parsedActions.map(a => a.action).join(", ")}]`, isGroup });
 		return;
 	}
 
@@ -1995,9 +2119,25 @@ async function handleQueenAgentTurn(options) {
 		/interact with external messaging APIs/i.test(rawResponse) ||
 		/monitor live system response times/i.test(rawResponse) ||
 		/access to live Facebook/i.test(rawResponse) ||
-		/retrieve a user's Facebook UID/i.test(rawResponse);
+		/retrieve a user's Facebook UID/i.test(rawResponse) ||
+		/don't have access to your group's chat history or member details/i.test(rawResponse) ||
+		/don't have access to live Messenger group member profiles/i.test(rawResponse) ||
+		/access to.*(?:member|profile|account details|chat history)/i.test(rawResponse);
 
 	if (isCapabilityRefusal) {
+		if (/(?:details|profile|info|who\s+is|who's|who\s+are)/i.test(rawPrompt)) {
+			const card = await toolRegistry.getUserDetailsCard({
+				query: rawPrompt,
+				event,
+				api,
+				threadsData,
+				usersData
+			});
+			if (card && card.ok && card.body) {
+				const attachments = card.attachment ? [card.attachment] : [];
+				return await deliverAgentMessage(message, api, thinking, card.body, attachments, uid, threadID);
+			}
+		}
 		if (/(?:uid|whois)/i.test(rawPrompt)) {
 			const uidRes = await toolRegistry.findUserUid(rawPrompt, event, api, threadsData, usersData);
 			if (uidRes && uidRes.uid) {
@@ -2044,7 +2184,7 @@ async function handleQueenAgentTurn(options) {
 		uid,
 		threadID
 	);
-	appendUserHistoryTurn(uid, rawPrompt, cleanReply);
+	appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", userPrompt: rawPrompt, assistantReply: cleanReply, isGroup });
 }
 
 const QueenAIGlobalBridge = {
@@ -2074,6 +2214,10 @@ const QueenAIGlobalBridge = {
 	extractImageUrlFromContext,
 	callMeowGeminiApi,
 	findUserUid: toolRegistry.findUserUid,
+	getUserDetailsCard: toolRegistry.getUserDetailsCard,
+	cleanPersonQuery: toolRegistry.cleanPersonQuery,
+	appendChatHistoryTurn,
+	getRecentHistoryContext,
 	deleteBotScript: toolRegistry.deleteBotScript,
 	handleReplyFallback: async (context) => {
 		const { event } = context || {};

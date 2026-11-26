@@ -5,7 +5,7 @@ const zlib = require("zlib");
 const axios = require("axios");
 const https = require("https");
 
-const PriyaPrefix = ["queen", "ai"];
+const PriyaPrefix = ["queen", "ai", "lex"];
 const OWNER_UID = "61580695941306";
 const OWNER_NAME = "Priyanshi Kaur";
 const OWNER_TITLES = ["Queen", "Owner", "Boss"];
@@ -317,14 +317,18 @@ function normalizeCommand(body) {
 	const lower = trimmed.toLowerCase();
 	const usedPrefix = PriyaPrefix.find(prefix => {
 		const normalizedPrefix = prefix.toLowerCase();
-		return lower === normalizedPrefix || lower.startsWith(`${normalizedPrefix} `);
+		return lower === normalizedPrefix ||
+			lower.startsWith(`${normalizedPrefix} `) ||
+			lower.startsWith(`${normalizedPrefix},`) ||
+			lower.startsWith(`${normalizedPrefix}:`);
 	});
 	if (!usedPrefix) {
 		return { usedPrefix: null, prompt: "" };
 	}
+	const rawPrompt = trimmed.slice(usedPrefix.length).replace(/^[,\s:]+/, "").trim();
 	return {
 		usedPrefix,
-		prompt: trimmed.slice(usedPrefix.length).trim()
+		prompt: rawPrompt
 	};
 }
 
@@ -651,8 +655,8 @@ function getStandaloneAgent() {
 module.exports = {
 	config: {
 		name: "ai",
-		aliases: ["queen", "queenai"],
-		version: "9.0.0",
+		aliases: ["queen", "queenai", "lex"],
+		version: "9.2.0",
 		author: "Priyanshi Kaur",
 		role: 0,
 		countDown: 2,
@@ -661,12 +665,15 @@ module.exports = {
 			en: "Autonomous Queen Bot AI controller with encrypted train.data & tool execution"
 		},
 		longDescription: {
-			en: "Independent Queen Bot AI agent powered by encrypted train.data v9.0.0, meow-dl /g API, ai-tokenizer budgeting, Owner UID 61580695941306 recognition, FCA API execution, one-shot/recurring tasks, and live script editing."
+			en: "Independent Queen Bot AI agent powered by encrypted train.data v9.2.0, compressed group memory, member lookup, meow-dl /g API, ai-tokenizer budgeting, Owner UID 61580695941306 recognition, FCA API execution, one-shot/recurring tasks, and live script editing."
 		},
 		guide: {
 			en:
-				"Prefixes: ai, queen, {p}ai\n\n" +
+				"Prefixes: ai, queen, lex, {p}ai\n\n" +
 				"Examples:\n" +
+				"• lex who is rishad in this group?\n" +
+				"• ai details of @someone\n" +
+				"• ai give me his uid\n" +
 				"• ai use, run or trigger ping after one hour\n" +
 				"• ai after one hour can you send me the song called songi songi by salima or something\n" +
 				"• ai trigger uptime2 command after every 24 hours and in 3 second delay trigger ping command\n" +
