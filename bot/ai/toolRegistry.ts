@@ -582,36 +582,110 @@ function getToolCatalogForPrompt(maxTokens = 1100) {
 function cleanFuzzyMediaQuery(rawQuery) {
 	let q = String(rawQuery || "").trim();
 	q = q
-		.replace(/^(?:can\s+you\s+|please\s+|could\s+you\s+|i\s+want\s+you\s+to\s+)+/i, "")
-		.replace(/^(?:send\s+me\s+|play\s+|download\s+|find\s+|search\s+|get\s+|give\s+me\s+)+/i, "")
-		.replace(/^(?:the\s+)?(?:song|music|track|audio|video)\s+(?:called|named|titled|by\s+name)?\s*/i, "")
+		.replace(/\b(?:you\s+can\s+use|permission\s+granted(?:\s+to\s+use)?|please\s+use|using|via)\s+[a-z0-9_.-]+(?:\s+(?:command|cmd|script))?\b/gi, " ")
+		.replace(/\b(?:sing\.ts|ytb\.ts|music\.ts|sing\s+(?:command|cmd)|ytb\s+(?:command|cmd)|(?:command|cmd)\s+sing)\b/gi, " ")
+		.replace(/\b(?:you\s+can\s+use|permission\s+granted(?:\s+to\s+use)?)\b/gi, " ")
+		.replace(/^(?:ok(?:ay)?\s+|hey\s+|hi\s+|please\s+|can\s+you\s+|could\s+you\s+|i\s+(?:wanna|want\s+to|would\s+like\s+to)\s+(?:listen(?:\s+to)?|hear|watch|see)\s+|i\s+want\s+)+/i, "")
+		.replace(/^(?:send(?:\s+me)?|play|find(?:\s+me)?|search(?:\s+for)?|download|get(?:\s+me)?|give\s+me)\s+/i, "")
+		.replace(/^(?:a|an|some|the)\s+/i, "")
+		.replace(/\b(?:peaceful\s+)?(?:song|music|track|audio|video|clip)\s+(?:called|named|titled|like|such\s+as|with)?\s*/gi, (m) => (/peaceful/i.test(m) ? "peaceful " : " "))
+		.replace(/\b(?:style|cmd|command|script)\b/gi, " ")
 		.replace(/\s+(?:or\s+something(?:\s+like\s+that)?|if\s+possible|please|right\s+now|for\s+me)\s*$/i, "")
+		.replace(/\b(?:but|and)\b/gi, " ")
 		.replace(/\s+by\s+/i, " ")
+		.replace(/\s+/g, " ")
 		.trim();
 	return q || String(rawQuery || "").trim();
+}
+
+function detectRequestedMediaType(rawText) {
+	const s = String(rawText || "").toLowerCase();
+	if (/\b(?:video|clip|mp4|mv|music\s+video|watch|4k|720p|1080p|short|shorts)\b/i.test(s)) {
+		return "video";
+	}
+	return "audio";
+}
+
+function scoreYouTubeCandidate(video, preferShortOrMedium = true) {
+	if (!video || !video.url || !video.title) return -1;
+	const sec = Number(video.seconds || 0);
+	if (sec <= 0) return 5;
+	let score = 50;
+	if (preferShortOrMedium) {
+		if (sec >= 90 && sec <= 480) score += 40;
+		else if (sec > 480 && sec <= 780) score += 20;
+		else if (sec > 1500) score -= 35;
+	}
+	if ((video.views || 0) > 10000) score += 10;
+	if (/official|audio|remix|edm|synthwave/i.test(video.title)) score += 5;
+	return score;
+}
+
+async function searchYouTubeCandidates(rawQuery, mediaType = "audio", limit = 5) {
+	const cleaned = cleanFuzzyMediaQuery(rawQuery);
+	if (!cleaned) return { ok: false, query: "", candidates: [] };
+	const wantsLongMix = /\b(?:mix|playlist|1\s*hour|hours?|study|lofi\s+stream)\b/i.test(String(rawQuery || ""));
+	try {
+		const yts = require("yt-search");
+		const searchRes = await yts(cleaned);
+		const rawVideos = Array.isArray(searchRes?.videos) ? searchRes.videos.slice(0, 12) : [];
+		const scored = rawVideos
+			.filter(v => v && v.url && v.videoId && (v.seconds > 0 || v.duration?.seconds > 0))
+			.map(v => {
+				const sec = Number(v.seconds || v.duration?.seconds || 0);
+				return {
+					videoId: v.videoId,
+					title: v.title || "",
+					author: v.author?.name || "Unknown",
+					duration: v.timestamp || v.duration?.timestamp || "",
+					seconds: sec,
+					views: Number(v.views || 0),
+					url: v.url,
+					shortUrl: `https://youtu.be/${v.videoId}`,
+					score: scoreYouTubeCandidate({ ...v, seconds: sec }, !wantsLongMix)
+				};
+			})
+			.sort((a, b) => b.score - a.score);
+
+		const candidates = scored.slice(0, Math.max(1, limit)).map((c, idx) => ({
+			index: idx + 1,
+			videoId: c.videoId,
+			title: c.title,
+			author: c.author,
+			duration: c.duration,
+			seconds: c.seconds,
+			views: c.views,
+			url: c.url,
+			shortUrl: c.shortUrl
+		}));
+		return {
+			ok: candidates.length > 0,
+			query: cleaned,
+			mediaType,
+			candidates
+		};
+	}
+	catch (err) {
+		return { ok: false, query: cleaned, mediaType, candidates: [], error: err?.message || "yt-search failed" };
+	}
 }
 
 async function resolveFuzzyQueryWithWeb(rawQuery, type = "general") {
 	const cleaned = type === "media" ? cleanFuzzyMediaQuery(rawQuery) : String(rawQuery || "").trim();
 	if (!cleaned) return { resolvedQuery: "", summary: "", topResult: null };
 
-	try {
-		const yts = require("yt-search");
-		const searchRes = await yts(cleaned);
-		const topVideo = searchRes?.videos?.[0];
-		if (topVideo && topVideo.title) {
-			return {
-				resolvedQuery: topVideo.title,
-				videoUrl: topVideo.url,
-				videoId: topVideo.videoId,
-				author: topVideo.author?.name || "",
-				duration: topVideo.timestamp || "",
-				summary: `Found on YouTube: "${topVideo.title}" by ${topVideo.author?.name || "Unknown"} (${topVideo.timestamp || "N/A"}) - ${topVideo.url}`,
-				topResult: topVideo
-			};
-		}
-	}
-	catch {
+	const ytRes = await searchYouTubeCandidates(rawQuery, "audio", 3);
+	const topVideo = ytRes?.candidates?.[0];
+	if (topVideo && topVideo.title) {
+		return {
+			resolvedQuery: topVideo.title,
+			videoUrl: topVideo.url,
+			videoId: topVideo.videoId,
+			author: topVideo.author,
+			duration: topVideo.duration,
+			summary: `Found on YouTube: "${topVideo.title}" by ${topVideo.author} (${topVideo.duration || "N/A"}) - ${topVideo.url}`,
+			topResult: topVideo
+		};
 	}
 
 	try {
@@ -1548,6 +1622,8 @@ module.exports = {
 	resolveToolName,
 	getToolCatalogForPrompt,
 	cleanFuzzyMediaQuery,
+	detectRequestedMediaType,
+	searchYouTubeCandidates,
 	resolveFuzzyQueryWithWeb,
 	executeCommandAsTool,
 	executeFcaApiTool,

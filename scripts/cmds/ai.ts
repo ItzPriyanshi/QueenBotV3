@@ -624,7 +624,7 @@ function getStandaloneAgent() {
 	}
 
 	const fallbackBridge = {
-		version: "9.3.0",
+		version: "9.4.0",
 		author: "Priyanshi Kaur",
 		ownerUid: OWNER_UID,
 		platform: "QueenBotV3",
@@ -657,7 +657,7 @@ module.exports = {
 	config: {
 		name: "ai",
 		aliases: ["queen", "queenai", "lex"],
-		version: "9.3.0",
+		version: "9.4.0",
 		author: "Priyanshi Kaur",
 		role: 0,
 		countDown: 2,

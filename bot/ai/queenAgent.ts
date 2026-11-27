@@ -24,6 +24,19 @@ catch {
 	}
 }
 
+let selfAwareness: any;
+try {
+	selfAwareness = require("./selfAwareness");
+}
+catch {
+	try {
+		selfAwareness = require("./selfAwareness.ts");
+	}
+	catch {
+		selfAwareness = null;
+	}
+}
+
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const DATA_DIR = path.join(process.cwd(), "scripts", "cmds");
@@ -409,6 +422,7 @@ function sanitizeAndFormatOutput(rawText) {
 		.replace(/^\s*\*\s+/gm, "• ")
 		.replace(/\*\*([^*\n]+)\*\*/g, "$1")
 		.replace(/__([^_\n]+)__/g, "$1")
+		.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => (label.trim() === url.trim() ? url.trim() : `${label.trim()} (${url.trim()})`))
 		.replace(/━{14,}/g, "────────────")
 		.replace(/─{14,}/g, "────────────")
 		.trim();
@@ -480,7 +494,9 @@ function buildDynamicSystemPrompt(userIdentity) {
 		`• GROUP ZSTD ROLLING MEMORY: Every group chat message is saved passively with user name, uid, tid, and gcName in JSON+ZSTD compressed storage (max 1MB per group) even when users are not talking to AI. Use this memory to understand context, topics, and answer chat history queries.`,
 		`• MEMBER & USER DETAILS PROTOCOL: You have full access to thread members and Facebook user details. Whenever a user asks 'who is <name>', 'details of <name>', or asks for a UID (mentioning or not), identify the user from the thread members list, group memory, usersData, or FCA API and output their details immediately. Never claim lack of access.`,
 		`• UNIVERSAL FLEXIBLE COMMAND SYNTHESIS: For ANY bot command the user asks you to run or check (ping, uptime, boxinfo, rank, weather, balance, sing, ytb, getinfo, bin, pinterest, count, admin, help, etc.), execute it internally via run_tool or run_workflow, read its captured result, think about the user's request, and deliver your OWN smart flexible response (alongside any captured media attachments). Never refuse or just say you cannot execute commands.`,
-		`• SONG REQUEST DIRECTIVE: Whenever a user asks for a song, music, or audio track, route to command 'sing' (or 'ytb'). Never use unconfigured spotify.`,
+		`• CODEBASE SELF-AWARENESS: You can inspect any file or command script in QueenBotV3 using list_files, inspect_file, or search_code to understand how features work and decide which command script fits best (for instance, comparing sing.ts vs ytb.ts vs music.ts before picking sing.ts).`,
+		`• MESSENGER TWO-MESSAGE MEDIA PROTOCOL: Messenger cannot attach audio or video inside an edited message. For ANY song, music, audio, or video request: (1) inspect/confirm sing.ts, (2) run yt_search or review YouTube search results to get real track/video details, (3) generate YOUR OWN smart intro message matching the user's vibe/style and real YouTube details, and (4) emit deliver_media_with_intro so your intro edits the thinking message (Message 1) and the downloaded audio/video is sent as a separate second message (Message 2). Never ask permission for YouTube Music app or cite music limits.`,
+		`• SONG REQUEST DIRECTIVE: Whenever a user asks for a song, music, audio, or YouTube video, route to command 'sing' (audio default, or args [<url>, 'video'] for video). Never use unconfigured spotify.`,
 		`• CAPABILITY REFUSAL FORBIDDEN: You have full authority to execute any bot command and FCA APIs. Never refuse or claim lack of tools.`,
 		`• ZERO COMMENTS IN SCRIPTS: Whenever generating, creating, or modifying bot scripts, write clean JavaScript/TypeScript with absolutely ZERO comments.`,
 		`• GROUP CHAT HISTORY ACCESS: You have access to this group's passive message history stored in JSON+ZSTD memory. When asked what the group is talking about, what happened in gc, or for chat history, use the stored context—never refuse or claim you cannot access it.`,
@@ -489,8 +505,13 @@ function buildDynamicSystemPrompt(userIdentity) {
 		...temporalRules.map(r => `• ${r}`),
 		``,
 		`AGENTIC <QUEEN_ACTION> JSON PROTOCOL:`,
-		`When you need to execute a command tool, schedule a one-time delayed task, schedule a recurring task, call an FCA API, search the web, modify a command response, or read/edit/create/delete/reload a script, output a valid JSON object inside <QUEEN_ACTION>...</QUEEN_ACTION>:`,
-		`1. Single immediate command: <QUEEN_ACTION>{"action":"run_tool","command":"<name>","args":[...],"modifyResponse":"<optional>"}</QUEEN_ACTION>`,
+		`You run inside a multi-step thinking loop. Emit inspection actions first if you need to read files or search YouTube, then emit your final execution action:`,
+		`0a. List project files/dirs: <QUEEN_ACTION>{"action":"list_files","dir":"scripts/cmds"}</QUEEN_ACTION>`,
+		`0b. Inspect any file or cmd code: <QUEEN_ACTION>{"action":"inspect_file","path":"scripts/cmds/sing.ts","startLine":1}</QUEEN_ACTION>`,
+		`0c. Search project code: <QUEEN_ACTION>{"action":"search_code","query":"<keyword>","scope":"all|cmds|bot"}</QUEEN_ACTION>`,
+		`0d. Search YouTube for song/video details: <QUEEN_ACTION>{"action":"yt_search","query":"<clean keywords>","mediaType":"audio|video"}</QUEEN_ACTION>`,
+		`1a. Two-message media delivery (AI intro edit + separate media message): <QUEEN_ACTION>{"action":"deliver_media_with_intro","command":"sing","args":["<youtube_url_or_query>"],"mediaType":"audio|video","introMessage":"<your self-generated message mentioning user style and song/video details>"}</QUEEN_ACTION>`,
+		`1b. Single immediate command: <QUEEN_ACTION>{"action":"run_tool","command":"<name>","args":[...],"modifyResponse":"<optional>"}</QUEEN_ACTION>`,
 		`2. One-time delayed task ("after 1 hour", "in 10 minutes" — runs ONCE, never repeats): <QUEEN_ACTION>{"action":"schedule_once","delaySeconds":3600,"description":"...","steps":[{"command":"<name>","args":[...],"fuzzySearch":true}]}</QUEEN_ACTION>`,
 		`3. Multi-step sequence (runs once): <QUEEN_ACTION>{"action":"run_workflow","steps":[{"command":"<name>","args":[],"delaySecondsBefore":0}]}</QUEEN_ACTION>`,
 		`4. Recurring schedule (ONLY when user says "every X hours/minutes/days"): <QUEEN_ACTION>{"action":"schedule_workflow","intervalSeconds":86400,"runImmediately":true,"description":"...","steps":[...]}</QUEEN_ACTION>`,
@@ -1377,7 +1398,10 @@ function parseNaturalTaskIntent(prompt) {
 		}
 	}
 
-	const hasChainVerb = /^(?:use|run|trigger|execute|call|start|launch|invoke|check|show|get|play)\b/i.test(lower);
+	const isCodeOrAnalysisQuestion = /\b(?:how\s+does|how\s+it\s+works|explain|compare|understand|inspect|source|code|which\s+(?:cmd|command|script)|why\s+did|debug|\.ts\b|\.js\b)\b/i.test(lower) &&
+		!/^(?:run|trigger|execute|launch)\b/i.test(lower);
+
+	const hasChainVerb = !isCodeOrAnalysisQuestion && /^(?:use|run|trigger|execute|call|start|launch|invoke|check|show|get|play)\b/i.test(lower);
 	if (hasChainVerb && /\s+(?:and\s+then|then|also|and)\s+|,\s*/i.test(p)) {
 		const chainClauses = p
 			.replace(/^(?:please|can\s+you)\s+/i, "")
@@ -1402,7 +1426,7 @@ function parseNaturalTaskIntent(prompt) {
 		/^(?:(?:use|run|trigger|execute|call|start|launch|invoke|play)(?:\s*,\s*|\s+or\s+|\s+and\s+|\s+))+(?:the\s+)?([a-zA-Z0-9_$-]+)(?:\s+command|\s+cmd)?(?:\s+(?:with|using|for|on)\s+(.+)|\s+(.+))?$/i
 	);
 
-	if (immediateTriggerMatch && !isRecurring && !oneTimeMatch) {
+	if (immediateTriggerMatch && !isRecurring && !oneTimeMatch && !isCodeOrAnalysisQuestion) {
 		const rawCmd = immediateTriggerMatch[1].trim();
 		const rawTail = (immediateTriggerMatch[2] || immediateTriggerMatch[3] || "").trim();
 		const monitorResponseTime = /\b(?:monitor(?:ing)?|measure(?:ing)?|check(?:ing)?|track(?:ing)?|log(?:ging)?|show|report|display|measure)\s+(?:the\s+)?(?:response\s+time|latency|execution\s+time|speed|ping|duration)\b/i.test(rawTail) || /\b(?:response\s+time|latency|execution\s+time)\b/i.test(rawTail);
@@ -1640,6 +1664,171 @@ async function deliverAgentMessage(message, api, thinkingMsg, text, attachments 
 	return null;
 }
 
+async function generateAiMediaIntroMessage({
+	candidate,
+	mediaType = "audio",
+	commandName = "sing",
+	userPrompt = "",
+	honorific = "Friend",
+	uid = ""
+}) {
+	const trackInfo = candidate
+		? `Title: "${candidate.title}" | Channel/Artist: "${candidate.author || "YouTube"}" | Duration: ${candidate.duration || "N/A"} | URL: ${candidate.shortUrl || candidate.url}`
+		: `Query: "${userPrompt}"`;
+	const prompt =
+		`[QUEENBOTV3 RESPONSE COMPOSER]\n` +
+		`You selected command "${commandName}.ts" for ${honorific}'s ${mediaType} request: "${String(userPrompt || "").slice(0, 300)}".\n` +
+		`Matched YouTube Result: ${trackInfo}\n\n` +
+		`Write a short, warm, natural 1-2 line response directly addressing ${honorific} (e.g. stating you found a matching ${mediaType} for their vibe/request with its real title, artist/channel, and duration, and that you are sending the media next). Do NOT mention YouTube Music app, phone permissions, or generation limits. Output ONLY the message text.`;
+
+	const aiRes = await callMeowGeminiApi({
+		prompt,
+		uid: `mediaintro_${uid}`,
+		model: "gemini-flash"
+	});
+	if (aiRes.ok && aiRes.response && !isCapabilityOrAssistantRefusal(aiRes.response)) {
+		return sanitizeAndFormatOutput(aiRes.response);
+	}
+	if (candidate) {
+		return `Found "${candidate.title}" by ${candidate.author || "YouTube"} (${candidate.duration || "N/A"}) via ${commandName}.ts, ${honorific} — sending the ${mediaType} now.`;
+	}
+	return `Preparing your ${mediaType} via ${commandName}.ts, ${honorific} — sending it next.`;
+}
+
+async function deliverMediaWithAiIntro({
+	commandName = "sing",
+	args = [],
+	mediaType = "audio",
+	introMessage = "",
+	candidates = [],
+	ytCandidate = null,
+	userPrompt = "",
+	honorific = "Friend",
+	uid = "",
+	prefix = ".",
+	thinkingMsg = null,
+	message,
+	api,
+	threadID,
+	execContext,
+	gcName = "",
+	isGroup = false,
+	monitorResponseTime = false
+}) {
+	const resolvedCmd = toolRegistry.resolveToolName(commandName) || "sing";
+	const chosenCmd = ["spotify", "music"].includes(resolvedCmd) ? (toolRegistry.resolveToolName("sing") || resolvedCmd) : resolvedCmd;
+	const cleanArgs = Array.isArray(args) ? args.map(a => String(a)) : [];
+	const effectiveMediaType = cleanArgs.some(a => /^(?:video|-v|mp4)$/i.test(a)) ? "video" : (mediaType === "video" ? "video" : "audio");
+
+	let pool = Array.isArray(candidates) ? [...candidates] : [];
+	const rawArgQuery = cleanArgs.filter(a => !/^(?:audio|video|-a|-v|mp3|m4a|mp4)$/i.test(a)).join(" ").trim();
+	const hasDirectYtUrl = /youtu\.be\/|youtube\.com\//i.test(rawArgQuery);
+	let primary = ytCandidate || pool.find(c => c.videoId && rawArgQuery.includes(c.videoId)) || pool[0] || null;
+
+	if (!primary && !hasDirectYtUrl) {
+		const searchQ = rawArgQuery || userPrompt;
+		const ytSearch = await toolRegistry.searchYouTubeCandidates(searchQ, effectiveMediaType, 4);
+		if (ytSearch?.candidates?.length) {
+			pool = ytSearch.candidates;
+			primary = pool[0];
+		}
+	}
+
+	const attemptEntries = [];
+	if (primary?.url) {
+		attemptEntries.push({
+			candidate: primary,
+			args: effectiveMediaType === "video" ? [primary.url, "video"] : [primary.url]
+		});
+		for (const backup of pool.slice(1, 2)) {
+			if (backup?.url && backup.url !== primary.url) {
+				attemptEntries.push({
+					candidate: backup,
+					args: effectiveMediaType === "video" ? [backup.url, "video"] : [backup.url]
+				});
+			}
+		}
+	}
+	else if (cleanArgs.length > 0) {
+		attemptEntries.push({ candidate: primary, args: cleanArgs });
+	}
+	else if (userPrompt) {
+		const qClean = toolRegistry.cleanFuzzyMediaQuery(userPrompt);
+		attemptEntries.push({
+			candidate: primary,
+			args: effectiveMediaType === "video" ? [...qClean.split(/\s+/), "video"] : qClean.split(/\s+/)
+		});
+	}
+
+	let lastResult = null;
+	let winningEntry = attemptEntries[0] || { candidate: primary, args: [] };
+	let elapsedMs = 0;
+	for (const entry of attemptEntries) {
+		const t0 = performance.now();
+		const res = await toolRegistry.executeCommandAsTool({
+			commandName: chosenCmd,
+			args: entry.args,
+			...execContext,
+			captureOutput: true
+		});
+		elapsedMs = Math.round(performance.now() - t0);
+		lastResult = res;
+		if (res.ok && Array.isArray(res.attachments) && res.attachments.length > 0) {
+			winningEntry = entry;
+			break;
+		}
+	}
+
+	const usedPrimary = !primary || winningEntry.candidate?.url === primary.url;
+	let finalIntro = usedPrimary ? String(introMessage || "").trim() : "";
+	if (!finalIntro || finalIntro.length < 10 || isCapabilityOrAssistantRefusal(finalIntro)) {
+		finalIntro = await generateAiMediaIntroMessage({
+			candidate: winningEntry.candidate || primary,
+			mediaType: effectiveMediaType,
+			commandName: chosenCmd,
+			userPrompt: rawArgQuery || userPrompt,
+			honorific,
+			uid
+		});
+	}
+
+	await deliverAgentMessage(message, api, thinkingMsg, finalIntro, [], uid, threadID);
+
+	if (lastResult && lastResult.ok && Array.isArray(lastResult.attachments) && lastResult.attachments.length > 0) {
+		const telemetryLine = monitorResponseTime
+			? `\n⚡ Response Time: ${elapsedMs} ms (${process.versions.bun ? "Bun v" + process.versions.bun : "Node " + process.version})`
+			: "";
+		const mediaCaption = sanitizeAndFormatOutput(
+			(lastResult.capturedText || `🎶 ${winningEntry.candidate?.title || rawArgQuery || "Media Ready"}`) + telemetryLine
+		);
+		const sent = await message.reply({
+			body: mediaCaption,
+			attachment: lastResult.attachments.length === 1 ? lastResult.attachments[0] : lastResult.attachments
+		});
+		const msgId2 = sent?.messageID || null;
+		if (msgId2) {
+			recordAiMessageId(msgId2, uid, threadID);
+			attachReplyEntriesToMessage(msgId2, uid, lastResult.virtualReplyEntries || []);
+		}
+		appendChatHistoryTurn({
+			threadID,
+			uid,
+			name: honorific,
+			gcName,
+			userPrompt,
+			assistantReply: `${finalIntro}\n[Sent ${effectiveMediaType} via ${chosenCmd}: ${winningEntry.candidate?.title || mediaCaption.slice(0, 120)}]`,
+			isGroup
+		});
+		return lastResult;
+	}
+
+	const errText = lastResult?.ok
+		? `⚠️ ${chosenCmd}.ts finished but did not attach media: ${lastResult.capturedText || "No stream returned."}`
+		: `⚠️ Could not download ${effectiveMediaType} via ${chosenCmd}.ts: ${lastResult?.error || "Stream error"}${lastResult?.githubSolution ? `\n💡 ${lastResult.githubSolution.fix}` : ""}`;
+	await message.reply(errText);
+	return lastResult;
+}
+
 async function runCapturedSynthesizedCommand({
 	commandName,
 	args = [],
@@ -1701,6 +1890,97 @@ async function runCapturedSynthesizedCommand({
 		});
 	}
 	return toolResult;
+}
+
+function isCapabilityOrAssistantRefusal(rawResponse) {
+	const r = String(rawResponse || "");
+	return /(?:cannot|can't|do not have|don't have)\s+(?:execute|run|trigger|interact|access|live\s+access|read\s+files|play|create)/i.test(r) ||
+		/interact with external messaging APIs/i.test(r) ||
+		/monitor live system response times/i.test(r) ||
+		/access to live Facebook/i.test(r) ||
+		/retrieve a user's Facebook UID/i.test(r) ||
+		/chat\s+logs|message\s+histor/i.test(r) ||
+		/don't have access to your group's chat history or member details/i.test(r) ||
+		/don't have access to live Messenger group member profiles/i.test(r) ||
+		/access to.*(?:member|profile|account details|chat history|group|local\s+files|codebase|project)/i.test(r) ||
+		/turn\s+on\s+(?:the\s+)?(?:youtube\s+music|spotify)/i.test(r) ||
+		/permission\s+to\s+(?:turn\s+on|open|access)\s+(?:the\s+)?(?:youtube\s+music|spotify)/i.test(r) ||
+		/create\s+more\s+music\s+as\s+soon\s+as\s+your\s+limit\s+resets/i.test(r) ||
+		/check\s+your\s+usage\s+in\s+settings/i.test(r);
+}
+
+const INSPECTION_ACTION_TYPES = new Set(["list_files", "inspect_file", "search_code", "yt_search"]);
+
+async function runReActInspectionActions(actions, cachedYtCandidates) {
+	const observations = [];
+	for (const act of actions) {
+		const kind = String(act?.action || "").toLowerCase();
+		if (kind === "list_files" && selfAwareness) {
+			const res = selfAwareness.listProjectTree(act.dir || "", 2);
+			observations.push(`[OBSERVATION list_files("${act.dir || "."}")]: ${res.ok ? res.entries.join(", ") : res.error}`);
+		}
+		else if (kind === "inspect_file" && selfAwareness) {
+			const target = act.path || act.target || act.command || "";
+			const res = selfAwareness.inspectProjectFile(target, act.startLine || 1, 100);
+			observations.push(
+				res.ok
+					? `[OBSERVATION inspect_file("${res.relPath}" lines ${res.startLine}-${res.endLine}/${res.totalLines})]:\n${res.content}`
+					: `[OBSERVATION inspect_file("${target}") ERROR]: ${res.error}`
+			);
+		}
+		else if (kind === "search_code" && selfAwareness) {
+			const res = selfAwareness.searchProjectCode(act.query || "", act.scope || "all", 15);
+			const formatted = res.ok && res.hits?.length
+				? res.hits.map(h => `${h.relPath}:${h.line}: ${h.snippet}`).join("\n")
+				: (res.error || "No matches found.");
+			observations.push(`[OBSERVATION search_code("${act.query || ""}")]:\n${formatted}`);
+		}
+		else if (kind === "yt_search") {
+			const mediaType = act.mediaType === "video" ? "video" : "audio";
+			const res = await toolRegistry.searchYouTubeCandidates(act.query || "", mediaType, 5);
+			if (res.ok && res.candidates?.length) {
+				cachedYtCandidates.splice(0, cachedYtCandidates.length, ...res.candidates);
+				const list = res.candidates
+					.map(c => `${c.index}. "${c.title}" | Channel: ${c.author} | Duration: ${c.duration} | Views: ${c.views} | URL: ${c.url}`)
+					.join("\n");
+				observations.push(`[OBSERVATION yt_search("${res.query}", "${mediaType}")]:\n${list}`);
+			}
+			else {
+				observations.push(`[OBSERVATION yt_search("${act.query || ""}")]: No YouTube candidates found.`);
+			}
+		}
+	}
+	return observations.join("\n\n");
+}
+
+function isMediaOrFollowupRequest(rawPrompt, recentHistory, replyBody) {
+	const p = String(rawPrompt || "").trim();
+	const combinedContext = `${replyBody || ""}\n${recentHistory || ""}`.toLowerCase();
+	if (/\b(?:song|songs|music|audio|track|listen|sing|synthwave|edm|lofi|remix|music\s+video|watch\s+.*video|send\s+.*video)\b/i.test(p)) {
+		return true;
+	}
+	if (/\b(?:sing\.ts|sing\s+cmd|ytb\.ts|permission\s+granted|use\s+sing)\b/i.test(p) && /\b(?:song|music|audio|synthwave|edm|listen|video)\b/i.test(combinedContext)) {
+		return true;
+	}
+	return false;
+}
+
+function resolveMediaSearchSeed(rawPrompt, recentHistory, replyBody) {
+	const p = String(rawPrompt || "").trim();
+	const stripped = toolRegistry.cleanFuzzyMediaQuery(p);
+	const hasUsefulKeywords = stripped && !/^(?:you\s+understand|permission\s+granted|what\s+i'?m\s+saying|use|sing)$/i.test(stripped) && stripped.length >= 4;
+	if (hasUsefulKeywords && /\b(?:song|music|audio|track|listen|video|synthwave|edm|lofi|remix|chill|peaceful)\b/i.test(p)) {
+		return p;
+	}
+	const combined = `${replyBody || ""}\n${recentHistory || ""}`;
+	const lines = combined.split(/\r?\n/).reverse();
+	for (const line of lines) {
+		if (/\b(?:song|music|audio|track|listen|video|synthwave|edm|lofi|remix)\b/i.test(line) && !/youtube\s+music\s+app|limit\s+resets|queen\s+bot:/i.test(line)) {
+			const afterColon = line.replace(/^[^:]{1,40}:\s*/, "").trim();
+			if (afterColon.length >= 5) return afterColon;
+		}
+	}
+	return p;
 }
 
 async function resolveGroupHistoryReply({ threadID, memberQuery = "", limit = 50, honorific = "Friend", uid = "", userPrompt = "" }) {
@@ -1866,10 +2146,54 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 	for (const actObj of actions) {
 		const actionType = String(actObj.action || "").toLowerCase();
 
+		if (actionType === "deliver_media_with_intro") {
+			await deliverMediaWithAiIntro({
+				commandName: actObj.command || "sing",
+				args: Array.isArray(actObj.args) ? actObj.args : [],
+				mediaType: actObj.mediaType === "video" ? "video" : toolRegistry.detectRequestedMediaType(userPrompt),
+				introMessage: actObj.introMessage || "",
+				candidates: Array.isArray(context?.cachedYtCandidates) ? context.cachedYtCandidates : [],
+				userPrompt,
+				honorific,
+				uid,
+				prefix,
+				thinkingMsg,
+				message,
+				api,
+				threadID,
+				execContext,
+				gcName: context?.currentGcName || "",
+				isGroup: Boolean(context?.isGroup)
+			});
+			continue;
+		}
+
 		if (actionType === "run_tool") {
 			const cmdName = actObj.command;
 			const cmdArgs = Array.isArray(actObj.args) ? actObj.args : [];
 			const modifyInstruction = String(actObj.modifyResponse || "").trim();
+			const canonicalTool = toolRegistry.resolveToolName(cmdName) || String(cmdName || "").toLowerCase();
+
+			if (["sing", "music", "ytb"].includes(canonicalTool) && !modifyInstruction) {
+				await deliverMediaWithAiIntro({
+					commandName: canonicalTool,
+					args: cmdArgs,
+					mediaType: toolRegistry.detectRequestedMediaType(`${userPrompt} ${cmdArgs.join(" ")}`),
+					candidates: Array.isArray(context?.cachedYtCandidates) ? context.cachedYtCandidates : [],
+					userPrompt,
+					honorific,
+					uid,
+					prefix,
+					thinkingMsg,
+					message,
+					api,
+					threadID,
+					execContext,
+					gcName: context?.currentGcName || "",
+					isGroup: Boolean(context?.isGroup)
+				});
+				continue;
+			}
 
 			await runCapturedSynthesizedCommand({
 				commandName: cmdName,
@@ -2512,6 +2836,32 @@ async function handleQueenAgentTurn(options) {
 			}
 		}
 		if (naturalTask.type === "immediate_tool") {
+			const canonicalImmediate = toolRegistry.resolveToolName(naturalTask.command) || naturalTask.command;
+			if (["sing", "music", "ytb"].includes(canonicalImmediate)) {
+				const initMsg = await message.reply(
+					userIdentity.isOwner
+						? "👑 Searching for the best match via sing.ts, My Queen..."
+						: `🔎 Finding your media, ${userIdentity.name}...`
+				);
+				await deliverMediaWithAiIntro({
+					commandName: canonicalImmediate,
+					args: naturalTask.args,
+					mediaType: toolRegistry.detectRequestedMediaType(`${rawPrompt} ${naturalTask.args.join(" ")}`),
+					userPrompt: naturalTask.chosenSong || rawPrompt,
+					honorific,
+					uid,
+					prefix,
+					thinkingMsg: initMsg,
+					message,
+					api,
+					threadID,
+					execContext,
+					gcName: currentGcName,
+					isGroup,
+					monitorResponseTime: Boolean(naturalTask.monitorResponseTime)
+				});
+				return;
+			}
 			await runCapturedSynthesizedCommand({
 				commandName: naturalTask.command,
 				args: naturalTask.args,
@@ -2601,9 +2951,8 @@ async function handleQueenAgentTurn(options) {
 
 	const systemInstruction = buildDynamicSystemPrompt(userIdentity);
 	const recentHistory = getRecentHistoryContext({ threadID, uid, isGroup }, 1100);
-	const replyContext = event?.messageReply?.body
-		? `\n[Replied Message: "${String(event.messageReply.body).slice(0, 500)}"]`
-		: "";
+	const replyBody = event?.messageReply?.body ? String(event.messageReply.body).slice(0, 500) : "";
+	const replyContext = replyBody ? `\n[Replied Message: "${replyBody}"]` : "";
 
 	const extractedImage = extractImageUrlFromContext(event, rawPrompt);
 	let promptToUse = rawPrompt;
@@ -2611,33 +2960,98 @@ async function handleQueenAgentTurn(options) {
 		promptToUse = "what is this image about short response no extra details";
 	}
 
-	const systemBanner =
-		`[QUEENBOT AI AGENTIC CORE]\n` +
-		`You are Queen Bot, an autonomous AI assistant powering QueenBotV3 on Facebook Messenger.\n` +
-		`CRITICAL: Give short, simple, direct answers with no extra details unless asked.\n` +
-		`When asked to run, check, or trigger ANY bot command, ALWAYS emit <QUEEN_ACTION>{"action":"run_tool","command":"<command>","args":[...]}</QUEEN_ACTION> (or multiple run_tool / run_workflow actions for chained tasks).\n` +
-		`When asked about group chat history, topics, or members, answer using the Group ZSTD Memory Context provided below.\n` +
-		`Never state that you cannot execute commands, access group logs, inspect member details, interact with messaging APIs, or monitor response times.`;
+	const cachedYtCandidates = [];
+	const projectContext = selfAwareness ? selfAwareness.buildProjectAwarenessContext(rawPrompt) : "";
+	const looksLikeMedia = !extractedImage && isMediaOrFollowupRequest(rawPrompt, recentHistory, replyBody);
+	let preSearchObservation = "";
+	let detectedMediaSeed = "";
+	let detectedMediaType = toolRegistry.detectRequestedMediaType(rawPrompt);
 
-	const compositePrompt = [
+	if (looksLikeMedia) {
+		detectedMediaSeed = resolveMediaSearchSeed(rawPrompt, recentHistory, replyBody);
+		detectedMediaType = toolRegistry.detectRequestedMediaType(detectedMediaSeed + " " + rawPrompt);
+		const ytSearch = await toolRegistry.searchYouTubeCandidates(detectedMediaSeed, detectedMediaType, 4);
+		if (ytSearch.ok && ytSearch.candidates?.length) {
+			cachedYtCandidates.push(...ytSearch.candidates);
+			preSearchObservation =
+				`[PRE-FETCHED YOUTUBE CANDIDATES FOR "${ytSearch.query}" (${detectedMediaType})]:\n` +
+				ytSearch.candidates.map(c => `${c.index}. "${c.title}" | Channel: ${c.author} | Duration: ${c.duration} | URL: ${c.url}`).join("\n");
+		}
+	}
+
+	const systemBanner =
+		`[QUEENBOTV3 INTERNAL ORCHESTRATOR • CODE & TOOL THINKING LOOP]\n` +
+		`You are Queen Bot orchestrating QueenBotV3 locally on Messenger.\n` +
+		`RULES:\n` +
+		`1. Short, simple, direct answers unless asked for details.\n` +
+		`2. Use list_files / inspect_file / search_code to read ANY project script before guessing how it works.\n` +
+		`3. NEVER ask permission for YouTube Music or Spotify apps and NEVER mention AI music limits.\n` +
+		`4. Messenger cannot send audio/video via message edit: for songs or videos, select sing.ts and emit <QUEEN_ACTION>{"action":"deliver_media_with_intro","command":"sing","args":[${detectedMediaType === "video" ? '"<url>","video"' : '"<url>"'}],"mediaType":"${detectedMediaType}","introMessage":"<your self-generated message mentioning user style and real song/video details>"}</QUEEN_ACTION>.\n` +
+		`5. For commands/queries, use run_tool or run_workflow. Never refuse capabilities.`;
+
+	const baseContextParts = [
 		systemBanner,
-		extractedImage ? `[Attached Image URL: ${extractedImage}]\n[Image Task]: Describe what is in this image. Keep response short and simple with no extra details.` : "",
+		extractedImage ? `[Attached Image URL: ${extractedImage}]\n[Image Task]: Describe what is in this image cleanly.` : "",
+		projectContext,
+		preSearchObservation,
 		recentHistory ? `[Recent Chat & Group ZSTD Memory Context]:\n${recentHistory}\n` : "",
 		`[User (${honorific}, UID: ${uid}${currentGcName ? `, GC: ${currentGcName}` : ""})]: ${promptToUse}${replyContext}`
-	]
-		.filter(Boolean)
-		.join("\n");
+	].filter(Boolean);
 
 	const activeModel = getUserModelPreference(uid);
-	const apiRes = await callMeowGeminiApi({
-		prompt: compositePrompt,
-		uid,
-		model: activeModel,
-		system: systemInstruction,
-		image: extractedImage
-	});
+	let reactScratchpad = "";
+	let apiRes: any = null;
+	let rawResponse = "";
+	let parsedActions = [];
 
-	if (!apiRes.ok) {
+	for (let step = 0; step < 4; step++) {
+		const stepPrompt = reactScratchpad
+			? `${baseContextParts.join("\n\n")}\n\n${reactScratchpad}\n\n[Continue reasoning with the new observations above. Emit final answer or final <QUEEN_ACTION> now.]`
+			: baseContextParts.join("\n\n");
+
+		apiRes = await callMeowGeminiApi({
+			prompt: stepPrompt,
+			uid: step === 0 ? uid : `react_${step}_${uid}`,
+			model: activeModel,
+			system: systemInstruction,
+			image: extractedImage
+		});
+
+		if (!apiRes.ok) break;
+		rawResponse = apiRes.response || "";
+		parsedActions = extractQueenActions(rawResponse);
+
+		const inspectOnly = parsedActions.filter(a => INSPECTION_ACTION_TYPES.has(String(a?.action || "").toLowerCase()));
+		if (inspectOnly.length > 0 && inspectOnly.length === parsedActions.length && step < 3) {
+			const obsText = await runReActInspectionActions(inspectOnly, cachedYtCandidates);
+			reactScratchpad += `\n[STEP ${step + 1} ASSISTANT]: ${rawResponse.slice(0, 500)}\n${obsText}\n`;
+			continue;
+		}
+		break;
+	}
+
+	if (!apiRes || !apiRes.ok) {
+		if (looksLikeMedia && cachedYtCandidates.length > 0) {
+			await deliverMediaWithAiIntro({
+				commandName: "sing",
+				args: [cachedYtCandidates[0].url, ...(detectedMediaType === "video" ? ["video"] : [])],
+				mediaType: detectedMediaType,
+				candidates: cachedYtCandidates,
+				ytCandidate: cachedYtCandidates[0],
+				userPrompt: detectedMediaSeed || rawPrompt,
+				honorific,
+				uid,
+				prefix,
+				thinkingMsg: thinking,
+				message,
+				api,
+				threadID,
+				execContext,
+				gcName: currentGcName,
+				isGroup
+			});
+			return;
+		}
 		if (/(?:gc|group|chat|history|talking|discussing|admins?|members?)/i.test(rawPrompt) && isGroup) {
 			const offlineGcReply = await resolveGroupHistoryReply({
 				threadID,
@@ -2651,34 +3065,64 @@ async function handleQueenAgentTurn(options) {
 			message,
 			api,
 			thinking,
-			`⚠️ Sorry ${honorific}, Queen Bot encountered a connection issue: ${apiRes.error}`,
+			`⚠️ Sorry ${honorific}, Queen Bot encountered a connection issue: ${apiRes?.error || "Gateway timeout"}`,
 			[],
 			uid,
 			threadID
 		);
 	}
 
-	const rawResponse = apiRes.response || "";
-	const parsedActions = extractQueenActions(rawResponse);
-
-	if (parsedActions.length > 0) {
-		await executeParsedQueenActions(parsedActions, options, userIdentity, thinking);
-		appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", gcName: currentGcName, userPrompt: rawPrompt, assistantReply: `[Executed Actions: ${parsedActions.map(a => a.action).join(", ")}]`, isGroup });
+	const finalExecutableActions = parsedActions.filter(a => !INSPECTION_ACTION_TYPES.has(String(a?.action || "").toLowerCase()));
+	if (finalExecutableActions.length > 0) {
+		await executeParsedQueenActions(
+			finalExecutableActions,
+			{ ...options, cachedYtCandidates, currentGcName, isGroup },
+			userIdentity,
+			thinking
+		);
+		appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", gcName: currentGcName, userPrompt: rawPrompt, assistantReply: `[Executed Actions: ${finalExecutableActions.map(a => a.action).join(", ")}]`, isGroup });
 		return;
 	}
 
-	const isCapabilityRefusal =
-		/(?:cannot|can't|do not have|don't have)\s+(?:execute|run|trigger|interact|access|live\s+access)/i.test(rawResponse) ||
-		/interact with external messaging APIs/i.test(rawResponse) ||
-		/monitor live system response times/i.test(rawResponse) ||
-		/access to live Facebook/i.test(rawResponse) ||
-		/retrieve a user's Facebook UID/i.test(rawResponse) ||
-		/chat\s+logs|message\s+histor/i.test(rawResponse) ||
-		/don't have access to your group's chat history or member details/i.test(rawResponse) ||
-		/don't have access to live Messenger group member profiles/i.test(rawResponse) ||
-		/access to.*(?:member|profile|account details|chat history|group)/i.test(rawResponse);
-
-	if (isCapabilityRefusal) {
+	if (isCapabilityOrAssistantRefusal(rawResponse)) {
+		if (looksLikeMedia) {
+			const seed = detectedMediaSeed || resolveMediaSearchSeed(rawPrompt, recentHistory, replyBody);
+			await deliverMediaWithAiIntro({
+				commandName: "sing",
+				args: cachedYtCandidates[0]?.url ? [cachedYtCandidates[0].url, ...(detectedMediaType === "video" ? ["video"] : [])] : [],
+				mediaType: detectedMediaType,
+				candidates: cachedYtCandidates,
+				ytCandidate: cachedYtCandidates[0] || null,
+				userPrompt: seed,
+				honorific,
+				uid,
+				prefix,
+				thinkingMsg: thinking,
+				message,
+				api,
+				threadID,
+				execContext,
+				gcName: currentGcName,
+				isGroup
+			});
+			return;
+		}
+		if (selfAwareness && /\b(?:code|file|script|how\s+does|sing\.ts|autolink|queenAgent|toolRegistry|groupMemory)\b/i.test(rawPrompt)) {
+			const codeCtx = selfAwareness.buildProjectAwarenessContext(rawPrompt) || selfAwareness.listProjectTree("", 2).entries?.join(", ");
+			if (codeCtx) {
+				const groundedRes = await callMeowGeminiApi({
+					prompt: `[GROUNDED CODE CONTEXT]\n${codeCtx.slice(0, 3200)}\n\nUser (${honorific}) asked: "${rawPrompt}". Answer accurately and concisely based on this code.`,
+					uid: `code_${uid}`,
+					model: "gemini-flash"
+				});
+				if (groundedRes.ok && groundedRes.response) {
+					const cleanCodeReply = sanitizeAndFormatOutput(groundedRes.response);
+					await deliverAgentMessage(message, api, thinking, cleanCodeReply, [], uid, threadID);
+					appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", gcName: currentGcName, userPrompt: rawPrompt, assistantReply: cleanCodeReply, isGroup });
+					return;
+				}
+			}
+		}
 		if (/(?:chat\s+history|gc\s+history|talking\s+about|discussing|happened\s+in\s+gc|message\s+history)/i.test(rawPrompt)) {
 			const gcReply = await resolveGroupHistoryReply({ threadID, honorific, uid, userPrompt: rawPrompt });
 			return await deliverAgentMessage(message, api, thinking, gcReply, [], uid, threadID);
@@ -2742,7 +3186,7 @@ async function handleQueenAgentTurn(options) {
 }
 
 const QueenAIGlobalBridge = {
-	version: "9.3.0",
+	version: "9.4.0",
 	author: "Priyanshi Kaur",
 	ownerUid: toolRegistry.OWNER_UID,
 	platform: "QueenBotV3",
@@ -2779,6 +3223,11 @@ const QueenAIGlobalBridge = {
 	groupMemorySearch: (threadID, query, limit = 25) => groupMemory ? groupMemory.searchGroupMemory(threadID, query, limit) : [],
 	groupMemoryListGroups: () => groupMemory ? groupMemory.listKnownGroups() : [],
 	groupMemoryClear: (threadID) => groupMemory ? groupMemory.clearGroupMemory(threadID) : false,
+	listProjectFiles: (dir, depth = 2) => selfAwareness ? selfAwareness.listProjectTree(dir, depth) : null,
+	inspectProjectFile: (target, startLine = 1) => selfAwareness ? selfAwareness.inspectProjectFile(target, startLine) : null,
+	searchProjectCode: (query, scope = "all") => selfAwareness ? selfAwareness.searchProjectCode(query, scope) : null,
+	searchYouTubeCandidates: toolRegistry.searchYouTubeCandidates,
+	deliverMediaWithAiIntro,
 	deleteBotScript: toolRegistry.deleteBotScript,
 	handleReplyFallback: async (context) => {
 		const { event } = context || {};
