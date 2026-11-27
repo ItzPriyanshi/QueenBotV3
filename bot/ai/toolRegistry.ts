@@ -530,6 +530,9 @@ function resolveToolName(rawName) {
 	const builtInSynonyms = {
 		up2: "uptime2",
 		up: "uptime",
+		upt: "uptime",
+		stats: "uptime",
+		sysinfo: "uptime",
 		yt: "sing",
 		youtube: "sing",
 		song: "sing",
@@ -540,6 +543,11 @@ function resolveToolName(rawName) {
 		spy: "getinfo",
 		userinfo: "getinfo",
 		whois: "getinfo",
+		groupinfo: "boxinfo",
+		ginfo: "boxinfo",
+		gcinfo: "boxinfo",
+		bal: "balance",
+		money: "balance",
 		pin: "pinterest",
 		paste: "bin",
 		pastebin: "bin",
@@ -710,54 +718,133 @@ async function executeCommandAsTool(options) {
 
 	const capturedTexts = [];
 	const capturedAttachments = [];
+	const messageSlots = new Map();
+	const virtualMsgIds = new Set();
+	const pendingCallbacks = [];
 	let lastSentResult = null;
+	let lastMsgId = "";
 
-	const captureHandler = async (payload, forwardToRealChat = false) => {
+	const extractSlotPayload = (payload) => {
+		let text = "";
+		const attachments = [];
 		if (typeof payload === "string") {
-			capturedTexts.push(payload);
+			text = payload;
 		}
 		else if (payload && typeof payload === "object") {
 			if (typeof payload.body === "string" && payload.body.trim()) {
-				capturedTexts.push(payload.body.trim());
+				text = payload.body.trim();
 			}
 			if (payload.attachment) {
 				if (Array.isArray(payload.attachment)) {
-					capturedAttachments.push(...payload.attachment);
+					attachments.push(...payload.attachment);
 				}
 				else {
-					capturedAttachments.push(payload.attachment);
+					attachments.push(payload.attachment);
 				}
 			}
 		}
-
-		if (forwardToRealChat && message && typeof message.reply === "function") {
-			lastSentResult = await message.reply(payload);
-			return lastSentResult;
-		}
-		return { messageID: `virtual_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` };
+		return { text, attachments };
 	};
 
-	let lastEditedText = "";
-	const proxyMessage = Object.create(message || {});
-	proxyMessage.reply = async (form) => captureHandler(form, !captureOutput);
-	proxyMessage.send = async (form) => captureHandler(form, !captureOutput);
-	proxyMessage.edit = async (text, msgID) => {
-		const textContent = typeof text === "string" ? text : (text?.body || "");
-		if (textContent) {
-			capturedTexts.push(textContent);
-			lastEditedText = textContent;
-		}
-		if (!captureOutput && message && typeof message.edit === "function") {
-			return await message.edit(text, msgID);
-		}
-		return { messageID: msgID || `virtual_edit_${Date.now()}` };
-	};
-	proxyMessage.unsend = async (msgID) => {
-		if (!captureOutput && message && typeof message.unsend === "function") {
-			return await message.unsend(msgID);
+	const findCallbackArg = (...extraArgs) => {
+		for (const a of extraArgs) {
+			if (typeof a === "function") return a;
 		}
 		return null;
 	};
+
+	const runCallbackTracked = (cb, err, info) => {
+		if (typeof cb !== "function") return;
+		const p = new Promise(resolve => {
+			queueMicrotask(async () => {
+				try {
+					await cb(err, info);
+				}
+				catch {
+				}
+				resolve(null);
+			});
+		});
+		pendingCallbacks.push(p);
+	};
+
+	const captureHandler = async (payload, forwardToRealChat = false, ...extraArgs) => {
+		const { text, attachments } = extractSlotPayload(payload);
+		const cb = findCallbackArg(...extraArgs);
+
+		if (text) capturedTexts.push(text);
+		if (attachments.length) capturedAttachments.push(...attachments);
+
+		if (forwardToRealChat && message && typeof message.reply === "function") {
+			lastSentResult = await message.reply(payload);
+			const realId = lastSentResult?.messageID || `sent_${Date.now()}`;
+			lastMsgId = realId;
+			messageSlots.set(realId, { text, attachments, deleted: false });
+			if (cb) runCallbackTracked(cb, null, lastSentResult);
+			return lastSentResult;
+		}
+
+		const virtualId = `virtual_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+		virtualMsgIds.add(virtualId);
+		lastMsgId = virtualId;
+		messageSlots.set(virtualId, { text, attachments, deleted: false });
+		const virtualInfo = {
+			messageID: virtualId,
+			threadID: event?.threadID || "",
+			timestamp: Date.now()
+		};
+		if (cb) runCallbackTracked(cb, null, virtualInfo);
+		return virtualInfo;
+	};
+
+	let lastEditedText = "";
+	const handleEditCapture = async (text, msgID, cb, forwardFn) => {
+		const textContent = typeof text === "string" ? text : (text?.body || "");
+		const targetId = msgID || lastMsgId;
+		if (textContent) {
+			capturedTexts.push(textContent);
+			lastEditedText = textContent;
+			if (targetId && messageSlots.has(targetId)) {
+				const slot = messageSlots.get(targetId);
+				slot.text = textContent;
+				slot.deleted = false;
+			}
+			else if (targetId) {
+				messageSlots.set(targetId, { text: textContent, attachments: [], deleted: false });
+			}
+		}
+		if (!captureOutput && typeof forwardFn === "function") {
+			const res = await forwardFn(text, msgID);
+			if (typeof cb === "function") runCallbackTracked(cb, null, res);
+			return res;
+		}
+		const editInfo = {
+			messageID: targetId || `virtual_edit_${Date.now()}`,
+			timestamp: Date.now()
+		};
+		if (typeof cb === "function") runCallbackTracked(cb, null, editInfo);
+		return editInfo;
+	};
+
+	const handleUnsendCapture = async (msgID, cb, forwardFn) => {
+		if (msgID && messageSlots.has(msgID)) {
+			const slot = messageSlots.get(msgID);
+			slot.deleted = true;
+		}
+		if (!captureOutput && typeof forwardFn === "function") {
+			const res = await forwardFn(msgID);
+			if (typeof cb === "function") runCallbackTracked(cb, null, res);
+			return res;
+		}
+		if (typeof cb === "function") runCallbackTracked(cb, null, true);
+		return null;
+	};
+
+	const proxyMessage = Object.create(message || {});
+	proxyMessage.reply = async (form, cb) => captureHandler(form, !captureOutput, cb);
+	proxyMessage.send = async (form, cb) => captureHandler(form, !captureOutput, cb);
+	proxyMessage.edit = async (text, msgID, cb) => handleEditCapture(text, msgID, cb, message?.edit?.bind(message));
+	proxyMessage.unsend = async (msgID, cb) => handleUnsendCapture(msgID, cb, message?.unsend?.bind(message));
 	proxyMessage.reaction = async (emoji, msgID) => {
 		if (message && typeof message.reaction === "function") {
 			return await message.reaction(emoji, msgID);
@@ -766,18 +853,9 @@ async function executeCommandAsTool(options) {
 	};
 
 	const proxyApi = Object.create(api || {});
-	proxyApi.sendMessage = async (form, threadID) => captureHandler(form, !captureOutput);
-	proxyApi.editMessage = async (text, msgID) => {
-		const textContent = typeof text === "string" ? text : (text?.body || "");
-		if (textContent) {
-			capturedTexts.push(textContent);
-			lastEditedText = textContent;
-		}
-		if (!captureOutput && api && typeof api.editMessage === "function") {
-			return await api.editMessage(text, msgID);
-		}
-		return { messageID: msgID || `virtual_edit_${Date.now()}` };
-	};
+	proxyApi.sendMessage = async (form, threadID, arg3, arg4) => captureHandler(form, !captureOutput, arg3, arg4);
+	proxyApi.editMessage = async (text, msgID, cb) => handleEditCapture(text, msgID, cb, api?.editMessage?.bind(api));
+	proxyApi.unsendMessage = async (msgID, cb) => handleUnsendCapture(msgID, cb, api?.unsendMessage?.bind(api));
 
 	const cleanArgs = Array.isArray(args) ? args.map(a => String(a)) : [];
 	const langCode = global.GoatBot?.config?.language || "en";
@@ -808,14 +886,43 @@ async function executeCommandAsTool(options) {
 			prefix
 		});
 
-		const finalText = lastEditedText || (capturedTexts.length ? capturedTexts[capturedTexts.length - 1] : capturedTexts.join("\n\n").trim());
+		if (pendingCallbacks.length > 0) {
+			await Promise.race([
+				Promise.allSettled([...pendingCallbacks]),
+				new Promise(r => setTimeout(r, 8000))
+			]);
+		}
+
+		const activeSlots = Array.from(messageSlots.values()).filter(s => !s.deleted);
+		const slotTexts = activeSlots.map(s => s.text).filter(Boolean);
+		const slotAttachments = [];
+		for (const s of activeSlots) {
+			if (s.attachments?.length) slotAttachments.push(...s.attachments);
+		}
+
+		const finalText = slotTexts.length > 0
+			? slotTexts.join("\n\n").trim()
+			: (lastEditedText || (capturedTexts.length ? capturedTexts[capturedTexts.length - 1] : ""));
+		const finalAttachments = slotAttachments.length > 0 ? slotAttachments : capturedAttachments;
+
+		const virtualReplyEntries = [];
+		if (global.GoatBot?.onReply instanceof Map) {
+			for (const vId of virtualMsgIds) {
+				if (global.GoatBot.onReply.has(vId)) {
+					virtualReplyEntries.push(global.GoatBot.onReply.get(vId));
+					global.GoatBot.onReply.delete(vId);
+				}
+			}
+		}
+
 		return {
 			ok: true,
 			commandName: canonical,
 			capturedText: finalText,
-			attachments: capturedAttachments,
+			attachments: finalAttachments,
 			allOutputs: capturedTexts,
-			lastSentResult
+			lastSentResult,
+			virtualReplyEntries
 		};
 	}
 	catch (err) {

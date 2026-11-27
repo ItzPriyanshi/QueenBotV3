@@ -624,7 +624,7 @@ function getStandaloneAgent() {
 	}
 
 	const fallbackBridge = {
-		version: "9.0.0",
+		version: "9.3.0",
 		author: "Priyanshi Kaur",
 		ownerUid: OWNER_UID,
 		platform: "QueenBotV3",
@@ -639,6 +639,7 @@ function getStandaloneAgent() {
 		isAiMessage: (msgId) => Boolean(getAiMessageMeta(msgId)),
 		getAiMessageMeta,
 		restoreAllSchedules: () => {},
+		passiveGroupMemoryRecord: () => {},
 		handleQueenAgentTurn,
 		handleReplyFallback: async (context) => {
 			const userText = typeof context?.event?.body === "string" ? context.event.body.trim() : "";
@@ -656,7 +657,7 @@ module.exports = {
 	config: {
 		name: "ai",
 		aliases: ["queen", "queenai", "lex"],
-		version: "9.2.0",
+		version: "9.3.0",
 		author: "Priyanshi Kaur",
 		role: 0,
 		countDown: 2,
@@ -665,7 +666,7 @@ module.exports = {
 			en: "Autonomous Queen Bot AI controller with encrypted train.data & tool execution"
 		},
 		longDescription: {
-			en: "Independent Queen Bot AI agent powered by encrypted train.data v9.2.0, compressed group memory, member lookup, meow-dl /g API, ai-tokenizer budgeting, Owner UID 61580695941306 recognition, FCA API execution, one-shot/recurring tasks, and live script editing."
+			en: "Independent Queen Bot AI agent powered by encrypted train.data v9.3.0, JSON+ZSTD group memory, universal command synthesis, complex workflow handling, member lookup, and live script editing."
 		},
 		guide: {
 			en:
@@ -793,7 +794,7 @@ module.exports = {
 	},
 
 	onChat: async function (context) {
-		const { event, isUserCallCommand } = context;
+		const { event, isUserCallCommand, role = 0 } = context;
 		if (isUserCallCommand) return;
 		if (!event || typeof event.body !== "string") return;
 		const body = event.body.trim();
@@ -802,7 +803,7 @@ module.exports = {
 		const agent = getStandaloneAgent();
 		const uid = String(event.senderID || "");
 		if (agent.isUserBlocked?.(uid)) return;
-		if (agent.isAiEnabledForUser && !agent.isAiEnabledForUser(uid, 0)) return;
+		if (agent.isAiEnabledForUser && !agent.isAiEnabledForUser(uid, role)) return;
 
 		const { usedPrefix, prompt } = normalizeCommand(body);
 		if (!usedPrefix) return;
@@ -811,12 +812,12 @@ module.exports = {
 	},
 
 	onReply: async function (context) {
-		const { event, Reply } = context;
+		const { event, Reply, role = 0 } = context;
 		if (!event) return;
 		const agent = getStandaloneAgent();
 		const uid = String(event.senderID || "");
 		if (agent.isUserBlocked?.(uid)) return;
-		if (agent.isAiEnabledForUser && !agent.isAiEnabledForUser(uid, 0)) return;
+		if (agent.isAiEnabledForUser && !agent.isAiEnabledForUser(uid, role)) return;
 
 		const meta = agent.getAiMessageMeta ? agent.getAiMessageMeta(event?.messageReply?.messageID) : null;
 		const replyAuthor = Reply?.author || meta?.author;

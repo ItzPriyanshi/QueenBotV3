@@ -420,6 +420,33 @@ module.exports = function (
 
 		let isUserCallCommand = false;
 
+		const isGroupThread = Boolean(isGroup || (threadID && senderID && String(threadID) !== String(senderID)));
+		if (body && senderID && threadID && isGroupThread) {
+			const qAI = getQueenAgent();
+			if (qAI && typeof qAI.passiveGroupMemoryRecord === "function") {
+				const tName = threadData?.threadName || "";
+				let uName = userData?.name || "";
+				if (!uName || /^user$/i.test(uName)) {
+					const matchedMember = Array.isArray(threadData?.members)
+						? threadData.members.find(m => String(m.userID || m.id) === String(senderID))
+						: null;
+					uName = matchedMember?.name || matchedMember?.nickname || event.senderName || "";
+				}
+				try {
+					qAI.passiveGroupMemoryRecord({
+						threadID: String(threadID),
+						uid: String(senderID),
+						name: uName,
+						body: String(body),
+						threadName: tName,
+						isGroup: true
+					});
+				}
+				catch {
+				}
+			}
+		}
+
 		async function onStart() {
 			if (!body || !body.startsWith(prefix)) {
 				return;

@@ -31,6 +31,9 @@ database/data/database.sqlite
 *ai_history.json
 *ai_schedules.json
 *ai_response_rules.json
+*ai_settings.json
+scripts/cmds/group_memory/
+*.qmem
 
 # Temporary assets and downloads
 scripts/cmds/tmp/*

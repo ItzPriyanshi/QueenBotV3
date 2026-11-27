@@ -11,6 +11,19 @@ catch {
 	toolRegistry = require("./toolRegistry.ts");
 }
 
+let groupMemory: any;
+try {
+	groupMemory = require("./groupMemory");
+}
+catch {
+	try {
+		groupMemory = require("./groupMemory.ts");
+	}
+	catch {
+		groupMemory = null;
+	}
+}
+
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const DATA_DIR = path.join(process.cwd(), "scripts", "cmds");
@@ -150,9 +163,15 @@ function writeJsonSafe(filePath, data) {
 	}
 }
 
+const MAX_THREAD_HISTORY_BYTES = 1024 * 1024;
+
 function compressTurns(turnsArray) {
 	if (!Array.isArray(turnsArray) || turnsArray.length === 0) return "";
 	try {
+		if (groupMemory && typeof groupMemory.zstdCompressJson === "function") {
+			const zstdBuf = groupMemory.zstdCompressJson(turnsArray);
+			if (zstdBuf) return zstdBuf.toString("base64");
+		}
 		const json = JSON.stringify(turnsArray);
 		const compressed = zlib.deflateRawSync(Buffer.from(json, "utf8"), { level: 9 });
 		return compressed.toString("base64");
@@ -166,6 +185,10 @@ function decompressTurns(base64Str) {
 	if (!base64Str || typeof base64Str !== "string") return [];
 	try {
 		const buf = Buffer.from(base64Str, "base64");
+		if (groupMemory && typeof groupMemory.zstdDecompressJson === "function") {
+			const parsed = groupMemory.zstdDecompressJson(buf, null);
+			if (Array.isArray(parsed)) return parsed;
+		}
 		const decompressed = zlib.inflateRawSync(buf);
 		return JSON.parse(decompressed.toString("utf8")) || [];
 	}
@@ -222,7 +245,7 @@ function setUserModelPreference(uid, model) {
 	writeJsonSafe(HISTORY_FILE, store);
 }
 
-function appendChatHistoryTurn({ threadID, uid, name = "Member", userPrompt, assistantReply, isGroup = false }) {
+function appendChatHistoryTurn({ threadID, uid, name = "Member", gcName = "", userPrompt, assistantReply, isGroup = false }) {
 	const store = loadHistoryStore();
 	const userKey = String(uid || "unknown");
 	if (!store.users[userKey] || typeof store.users[userKey] !== "object") {
@@ -242,18 +265,27 @@ function appendChatHistoryTurn({ threadID, uid, name = "Member", userPrompt, ass
 		const threadKey = String(threadID);
 		if (!store.threads[threadKey] || typeof store.threads[threadKey] !== "object") {
 			store.threads[threadKey] = {
+				tid: threadKey,
+				gcName: String(gcName || ""),
 				activeTurns: [],
 				compressedHistory: "",
 				updatedAt: Date.now()
 			};
 		}
 		const threadObj = store.threads[threadKey];
+		threadObj.tid = threadKey;
+		if (gcName && String(gcName).trim()) {
+			threadObj.gcName = String(gcName).trim().slice(0, 100);
+		}
 		if (!Array.isArray(threadObj.activeTurns)) {
 			threadObj.activeTurns = [];
 		}
 		threadObj.activeTurns.push({
+			uid: String(uid || ""),
 			senderID: String(uid || ""),
 			name: String(name || "Member").slice(0, 50),
+			tid: threadKey,
+			gcName: threadObj.gcName || "",
 			user: String(userPrompt || "").slice(0, 1000),
 			assistant: String(assistantReply || "").slice(0, 1200),
 			ts: Date.now()
@@ -261,11 +293,40 @@ function appendChatHistoryTurn({ threadID, uid, name = "Member", userPrompt, ass
 
 		if (threadObj.activeTurns.length >= 6) {
 			const existingOlder = decompressTurns(threadObj.compressedHistory);
-			const toCompress = [...existingOlder, ...threadObj.activeTurns.slice(0, -3)].slice(-25);
+			const toCompress = [...existingOlder, ...threadObj.activeTurns.slice(0, -3)].slice(-40);
 			threadObj.compressedHistory = compressTurns(toCompress);
 			threadObj.activeTurns = threadObj.activeTurns.slice(-3);
 		}
+		while (Buffer.byteLength(JSON.stringify(threadObj), "utf8") > MAX_THREAD_HISTORY_BYTES) {
+			const existingOlder = decompressTurns(threadObj.compressedHistory);
+			if (existingOlder.length > 2) {
+				const trimmed = existingOlder.slice(Math.ceil(existingOlder.length * 0.25));
+				threadObj.compressedHistory = compressTurns(trimmed);
+			}
+			else if (threadObj.activeTurns.length > 1) {
+				threadObj.activeTurns.shift();
+			}
+			else {
+				break;
+			}
+		}
 		threadObj.updatedAt = Date.now();
+
+		if (isGroup && groupMemory && assistantReply) {
+			try {
+				groupMemory.passiveRecord({
+					threadID: threadKey,
+					uid: "queenbot",
+					name: "Queen Bot",
+					body: String(assistantReply).slice(0, 350),
+					threadName: gcName || threadObj.gcName || "",
+					isGroup: true,
+					ts: Date.now()
+				});
+			}
+			catch {
+			}
+		}
 	}
 
 	writeJsonSafe(HISTORY_FILE, store);
@@ -275,13 +336,21 @@ function appendUserHistoryTurn(uid, userPrompt, assistantReply) {
 	appendChatHistoryTurn({ threadID: null, uid, name: "User", userPrompt, assistantReply, isGroup: false });
 }
 
-function getRecentHistoryContext(options, maxTokens = 900) {
+function getRecentHistoryContext(options, maxTokens = 1100) {
 	const { threadID, uid, isGroup = false } = typeof options === "object" && options !== null
 		? options
 		: { threadID: null, uid: String(options || ""), isGroup: false };
 
-	const effectiveMax = typeof maxTokens === "number" ? maxTokens : 900;
+	const effectiveMax = typeof maxTokens === "number" ? maxTokens : 1100;
 	const store = loadHistoryStore();
+	const blocks = [];
+
+	if (threadID && groupMemory && typeof groupMemory.getGroupPromptContext === "function") {
+		const passiveCtx = groupMemory.getGroupPromptContext(threadID, 25);
+		if (passiveCtx) {
+			blocks.push(passiveCtx);
+		}
+	}
 
 	if (isGroup && threadID) {
 		const threadKey = String(threadID);
@@ -289,23 +358,28 @@ function getRecentHistoryContext(options, maxTokens = 900) {
 		if (threadObj) {
 			const older = decompressTurns(threadObj.compressedHistory);
 			const active = Array.isArray(threadObj.activeTurns) ? threadObj.activeTurns : [];
-			const allTurns = [...older, ...active].slice(-8);
+			const allTurns = [...older, ...active].slice(-6);
 			if (allTurns.length > 0) {
 				const formatted = allTurns
 					.map(t => `${t.name || "Member"}: ${t.user}\nQueen Bot: ${t.assistant}`)
 					.join("\n\n");
-				return toolRegistry.truncateToTokenBudget(formatted, effectiveMax);
+				blocks.push(`[Recent AI Conversation Turns]:\n${formatted}`);
 			}
 		}
 	}
+	else {
+		const turns = store.users[String(uid)]?.turns;
+		if (Array.isArray(turns) && turns.length > 0) {
+			const formatted = turns
+				.slice(-5)
+				.map(t => `User: ${t.user}\nQueen Bot: ${t.assistant}`)
+				.join("\n\n");
+			blocks.push(`[Recent AI Conversation Turns]:\n${formatted}`);
+		}
+	}
 
-	const turns = store.users[String(uid)]?.turns;
-	if (!Array.isArray(turns) || turns.length === 0) return "";
-	const formatted = turns
-		.slice(-5)
-		.map(t => `User: ${t.user}\nQueen Bot: ${t.assistant}`)
-		.join("\n\n");
-	return toolRegistry.truncateToTokenBudget(formatted, effectiveMax);
+	if (blocks.length === 0) return "";
+	return toolRegistry.truncateToTokenBudget(blocks.join("\n\n"), effectiveMax);
 }
 
 function clearLocalHistory(uid, threadID) {
@@ -403,11 +477,13 @@ function buildDynamicSystemPrompt(userIdentity) {
 		`CORE DIRECTIVES:`,
 		...directives.map(d => `• ${d}`),
 		`• CRITICAL OUTPUT FORMAT: Keep all responses short, simple, concise, and direct with NO extra details or unsolicited filler unless user explicitly asks.`,
-		`• GROUP ROLLING MEMORY: Group chat history is saved per threadID with compressed rolling memory. Older turns are compressed to preserve context while using minimal RAM and storage.`,
-		`• MEMBER & USER DETAILS PROTOCOL: You have full access to thread members and Facebook user details. Whenever a user asks 'who is <name>', 'details of <name>', or asks for a UID (mentioning or not), identify the user from the thread members list, usersData, or FCA API and output their details immediately. Never claim lack of access.`,
+		`• GROUP ZSTD ROLLING MEMORY: Every group chat message is saved passively with user name, uid, tid, and gcName in JSON+ZSTD compressed storage (max 1MB per group) even when users are not talking to AI. Use this memory to understand context, topics, and answer chat history queries.`,
+		`• MEMBER & USER DETAILS PROTOCOL: You have full access to thread members and Facebook user details. Whenever a user asks 'who is <name>', 'details of <name>', or asks for a UID (mentioning or not), identify the user from the thread members list, group memory, usersData, or FCA API and output their details immediately. Never claim lack of access.`,
+		`• UNIVERSAL FLEXIBLE COMMAND SYNTHESIS: For ANY bot command the user asks you to run or check (ping, uptime, boxinfo, rank, weather, balance, sing, ytb, getinfo, bin, pinterest, count, admin, help, etc.), execute it internally via run_tool or run_workflow, read its captured result, think about the user's request, and deliver your OWN smart flexible response (alongside any captured media attachments). Never refuse or just say you cannot execute commands.`,
 		`• SONG REQUEST DIRECTIVE: Whenever a user asks for a song, music, or audio track, route to command 'sing' (or 'ytb'). Never use unconfigured spotify.`,
 		`• CAPABILITY REFUSAL FORBIDDEN: You have full authority to execute any bot command and FCA APIs. Never refuse or claim lack of tools.`,
 		`• ZERO COMMENTS IN SCRIPTS: Whenever generating, creating, or modifying bot scripts, write clean JavaScript/TypeScript with absolutely ZERO comments.`,
+		`• GROUP CHAT HISTORY ACCESS: You have access to this group's passive message history stored in JSON+ZSTD memory. When asked what the group is talking about, what happened in gc, or for chat history, use the stored context—never refuse or claim you cannot access it.`,
 		``,
 		`TEMPORAL & SMART TASK RULES:`,
 		...temporalRules.map(r => `• ${r}`),
@@ -448,59 +524,64 @@ async function callMeowGeminiApi({ prompt, uid, model = "gemini-auto", system = 
 		payload.image = image;
 	}
 
-	try {
-		const postRes = await axios.post(endpoint, payload, {
-			headers: { "Content-Type": "application/json" },
-			httpsAgent,
-			timeout: timeoutMs
-		});
-		if (postRes?.data?.status === "success" && typeof postRes.data.response === "string") {
-			return {
-				ok: true,
-				response: postRes.data.response,
-				model: postRes.data.model || model,
-				timings: postRes.data.timings || null
-			};
+	let lastErrMsg = "Failed to reach Queen AI endpoint";
+	for (let attempt = 0; attempt < 2; attempt++) {
+		if (attempt > 0) {
+			await sleep(1100 * attempt);
 		}
-	}
-	catch {
-	}
 
-	try {
-		const params = new URLSearchParams();
-		params.set("prompt", safePrompt);
-		params.set("model", model || "gemini-auto");
-		if (uid) params.set("uid", String(uid));
-		if (system) params.set("system", toolRegistry.truncateToTokenBudget(system, 900));
-		if (image) params.set("image", image);
+		try {
+			const postRes = await axios.post(endpoint, payload, {
+				headers: { "Content-Type": "application/json" },
+				httpsAgent,
+				timeout: timeoutMs
+			});
+			if (postRes?.data?.status === "success" && typeof postRes.data.response === "string") {
+				return {
+					ok: true,
+					response: postRes.data.response,
+					model: postRes.data.model || model,
+					timings: postRes.data.timings || null
+				};
+			}
+		}
+		catch (err: any) {
+			lastErrMsg = err?.response?.data?.error || err?.message || lastErrMsg;
+		}
 
-		const getUrl = `${endpoint}?${params.toString()}`;
-		const getRes = await axios.get(getUrl, {
-			httpsAgent,
-			timeout: timeoutMs
-		});
-		if (getRes?.data?.status === "success" && typeof getRes.data.response === "string") {
-			return {
-				ok: true,
-				response: getRes.data.response,
-				model: getRes.data.model || model,
-				timings: getRes.data.timings || null
-			};
+		try {
+			const params = new URLSearchParams();
+			params.set("prompt", safePrompt);
+			params.set("model", model || "gemini-auto");
+			if (uid) params.set("uid", String(uid));
+			if (system) params.set("system", toolRegistry.truncateToTokenBudget(system, 900));
+			if (image) params.set("image", image);
+
+			const getUrl = `${endpoint}?${params.toString()}`;
+			const getRes = await axios.get(getUrl, {
+				httpsAgent,
+				timeout: timeoutMs
+			});
+			if (getRes?.data?.status === "success" && typeof getRes.data.response === "string") {
+				return {
+					ok: true,
+					response: getRes.data.response,
+					model: getRes.data.model || model,
+					timings: getRes.data.timings || null
+				};
+			}
+			if (getRes?.data?.error) {
+				lastErrMsg = getRes.data.error;
+			}
 		}
-		if (getRes?.data?.error) {
-			throw new Error(getRes.data.error);
+		catch (err: any) {
+			lastErrMsg = err?.response?.data?.error || err?.message || lastErrMsg;
 		}
-	}
-	catch (err: any) {
-		return {
-			ok: false,
-			error: err?.response?.data?.error || err?.message || "Failed to reach Queen AI endpoint"
-		};
 	}
 
 	return {
 		ok: false,
-		error: "Empty response from Queen AI endpoint"
+		error: lastErrMsg
 	};
 }
 
@@ -575,6 +656,120 @@ async function rewriteTextWithQueenAi(commandName, originalText, instruction, ui
 		return sanitizeAndFormatOutput(res.response);
 	}
 	return cleanOrig;
+}
+
+function passiveGroupMemoryRecord({ threadID, uid, name, body, threadName, isGroup = true }) {
+	if (!groupMemory || !threadID || !body) return;
+	try {
+		groupMemory.passiveRecord({ threadID, uid, name, body, threadName, isGroup, ts: Date.now() });
+	}
+	catch {
+	}
+}
+
+async function synthesizeToolExecutionResult({
+	toolResult,
+	userPrompt = "",
+	honorific = "Friend",
+	uid = "",
+	prefix = ".",
+	modifyInstruction = "",
+	elapsedMs = 0,
+	monitorResponseTime = false
+}) {
+	if (!toolResult) return "";
+	if (!toolResult.ok) {
+		const githubHelp = toolResult.githubSolution
+			? `\n\n💡 Suggested Fix (${toolResult.githubSolution.githubRef}):\n• ${toolResult.githubSolution.fix}\n• Ref: ${toolResult.githubSolution.repo}`
+			: "";
+		return `⚠️ ${honorific}, "${toolResult.commandName}" hit an error: ${toolResult.error}${githubHelp}`;
+	}
+
+	let rawBody = String(toolResult.capturedText || "").trim();
+	if (modifyInstruction && rawBody) {
+		return await rewriteTextWithQueenAi(toolResult.commandName, rawBody, modifyInstruction, uid);
+	}
+
+	const attachmentCount = Array.isArray(toolResult.attachments) ? toolResult.attachments.length : 0;
+	const telemetryNote = monitorResponseTime
+		? `\n[EXECUTION TELEMETRY]: Command "${prefix}${toolResult.commandName}" completed in ${elapsedMs} ms on ${process.versions.bun ? "Bun v" + process.versions.bun : "Node " + process.version}. Include this response time clearly in your answer.`
+		: "";
+
+	const synthPrompt =
+		`[TOOL EXECUTION RESULT FOR ${String(honorific).toUpperCase()}]\n` +
+		(userPrompt ? `User Request: "${String(userPrompt).slice(0, 400)}"\n` : "") +
+		`Command Executed: "${toolResult.commandName}"\n` +
+		(attachmentCount > 0 ? `Attachments Returned: ${attachmentCount}\n` : "") +
+		`Raw Command Output:\n${(rawBody || `[Media/Attachment sent cleanly by ${toolResult.commandName}]`).slice(0, 2200)}${telemetryNote}\n\n` +
+		`Think about the user's request and the captured command output above, then write YOUR OWN smart, natural, flexible response as Queen Bot addressing ${honorific}. Keep all exact numbers, latencies, UIDs, URLs, titles, and metrics accurate. Keep it concise unless detailed metrics are useful. Do NOT use raw ** Markdown.`;
+
+	const synthRes = await callMeowGeminiApi({
+		prompt: synthPrompt,
+		uid: `synth_${uid || "sys"}`,
+		model: "gemini-flash"
+	});
+
+	if (synthRes.ok && synthRes.response) {
+		return sanitizeAndFormatOutput(synthRes.response);
+	}
+
+	const fallbackParts = [];
+	if (rawBody) {
+		fallbackParts.push(rawBody);
+	}
+	else {
+		fallbackParts.push(`✅ Executed ${prefix}${toolResult.commandName}, ${honorific}.`);
+	}
+	if (monitorResponseTime) {
+		fallbackParts.push(`⚡ Response Time: ${elapsedMs} ms (${process.versions.bun ? "Bun v" + process.versions.bun : "Node " + process.version})`);
+	}
+	return fallbackParts.join("\n\n");
+}
+
+async function synthesizeMultiToolResults({ stepEntries, userPrompt = "", honorific = "Friend", uid = "" }) {
+	const summaryBlocks = [];
+	const allAttachments = [];
+	const allReplyEntries = [];
+
+	for (const entry of stepEntries) {
+		const res = entry.result;
+		if (!res) continue;
+		if (Array.isArray(res.attachments) && res.attachments.length) {
+			allAttachments.push(...res.attachments);
+		}
+		if (Array.isArray(res.virtualReplyEntries) && res.virtualReplyEntries.length) {
+			allReplyEntries.push(...res.virtualReplyEntries);
+		}
+		if (res.ok) {
+			summaryBlocks.push(`• Command "${entry.label || res.commandName}"${entry.elapsedMs ? ` (${entry.elapsedMs}ms)` : ""}:\n${(res.capturedText || `[${res.attachments?.length || 0} attachment(s) ready]`).slice(0, 1200)}`);
+		}
+		else {
+			summaryBlocks.push(`• Command "${entry.label || res.commandName}" FAILED: ${res.error}`);
+		}
+	}
+
+	const combinedRaw = summaryBlocks.join("\n\n");
+	const synthPrompt =
+		`[MULTI-TOOL EXECUTION RESULTS FOR ${String(honorific).toUpperCase()}]\n` +
+		(userPrompt ? `User Request: "${String(userPrompt).slice(0, 400)}"\n` : "") +
+		`Results From All Executed Steps:\n${combinedRaw.slice(0, 3200)}\n\n` +
+		`Synthesize ONE smart, unified, natural response as Queen Bot addressing ${honorific}. Preserve all exact metrics, numbers, links, and IDs. Keep it clear and concise.`;
+
+	const synthRes = await callMeowGeminiApi({
+		prompt: synthPrompt,
+		uid: `multisynth_${uid || "sys"}`,
+		model: "gemini-flash"
+	});
+
+	const finalText = synthRes.ok && synthRes.response
+		? sanitizeAndFormatOutput(synthRes.response)
+		: combinedRaw;
+
+	return {
+		text: finalText,
+		attachments: allAttachments,
+		virtualReplyEntries: allReplyEntries
+	};
 }
 
 async function transformOutgoingMessage(commandName, payload, oneShotInstruction = "") {
@@ -901,7 +1096,7 @@ function extractSingleClauseStep(clause) {
 	);
 	if (songFuzzyMatch && songFuzzyMatch[1]) {
 		const cleanedQuery = toolRegistry.cleanFuzzyMediaQuery(songFuzzyMatch[1]);
-		const preferredMusicTool = toolRegistry.resolveToolName("ytb") || toolRegistry.resolveToolName("sing") || "ytb";
+		const preferredMusicTool = toolRegistry.resolveToolName("sing") || toolRegistry.resolveToolName("ytb") || "sing";
 		const args = preferredMusicTool === "ytb" ? ["-a", ...cleanedQuery.split(/\s+/)] : cleanedQuery.split(/\s+/);
 		return {
 			command: preferredMusicTool,
@@ -913,7 +1108,7 @@ function extractSingleClauseStep(clause) {
 	}
 
 	const triggerMatch = stripped.match(
-		/(?:(?:use|run|trigger|execute|call|start|launch|invoke)(?:\s*,\s*|\s+or\s+|\s+and\s+|\s+))+(?:the\s+)?([a-zA-Z0-9_$-]+)(?:\s+command|\s+cmd)?(?:\s+with\s+args?\s+(.+)|\s+(.+))?$/i
+		/(?:(?:use|run|trigger|execute|call|start|launch|invoke|check|show|get|open)(?:\s*,\s*|\s+or\s+|\s+and\s+|\s+))+(?:the\s+)?([a-zA-Z0-9_$-]+)(?:\s+command|\s+cmd)?(?:\s+(?:with\s+args?|with|for|in|on)\s+(.+)|\s+(.+))?$/i
 	);
 	if (triggerMatch) {
 		const rawCmd = triggerMatch[1].trim();
@@ -927,18 +1122,34 @@ function extractSingleClauseStep(clause) {
 		};
 	}
 
-	const cmdBeforeWord = stripped.match(/^([a-zA-Z0-9_$-]+)\s+(?:command|cmd)$/i);
+	const cmdBeforeWord = stripped.match(/^([a-zA-Z0-9_$-]+)\s+(?:command|cmd)(?:\s+(.+))?$/i);
 	if (cmdBeforeWord) {
 		const rawCmd = cmdBeforeWord[1].trim();
+		const rawTail = (cmdBeforeWord[2] || "").trim();
 		const canonical = toolRegistry.resolveToolName(rawCmd) || rawCmd.toLowerCase();
 		return {
 			command: canonical,
-			args: [],
+			args: rawTail ? rawTail.split(/\s+/) : [],
 			delaySecondsBefore
 		};
 	}
 
 	return null;
+}
+
+function extractCommandStepFromChainClause(clause, inheritVerb = false) {
+	const direct = extractSingleClauseStep(clause);
+	if (direct) return direct;
+	if (!inheritVerb) return null;
+	const parts = String(clause || "").trim().split(/\s+/).filter(Boolean);
+	if (parts.length === 0) return null;
+	const resolved = toolRegistry.resolveToolName(parts[0]);
+	if (!resolved) return null;
+	return {
+		command: resolved,
+		args: parts.slice(1),
+		delaySecondsBefore: 0
+	};
 }
 
 const RANDOM_HIT_SONGS = [
@@ -993,6 +1204,43 @@ function parseNaturalTaskIntent(prompt) {
 		};
 	}
 
+	if (/^(?:clear|reset|wipe)\s+(?:gc|group)\s+(?:chat\s+)?memory$/i.test(lower)) {
+		return { type: "group_memory_control", action: "clear" };
+	}
+
+	if (/^(?:(?:gc|group)\s+memory(?:\s+(?:status|stats|info|size))?|memory\s+(?:status|stats|info)|list\s+stored\s+groups?)$/i.test(lower)) {
+		return { type: "group_memory_control", action: "status" };
+	}
+
+	const memberActivityMatch = p.match(
+		/^(?:what\s+(?:did|has|was)\s+(.+?)\s+(?:say|talk(?:ing)?\s+about|chat(?:ting)?\s+about|discuss(?:ing)?)|(.+?)(?:'s)?\s+(?:messages?|history)\s+in\s+(?:this\s+)?(?:gc|group))\b/i
+	);
+	if (memberActivityMatch) {
+		const memberQuery = (memberActivityMatch[1] || memberActivityMatch[2] || "")
+			.replace(/\s+in\s+(?:this\s+)?(?:gc|group|chat).*$/i, "")
+			.trim();
+		if (memberQuery && !/^(?:we|they|everyone|all|people|members)$/i.test(memberQuery)) {
+			return { type: "group_history_summary", memberQuery };
+		}
+	}
+
+	const countHistoryMatch = lower.match(/(?:last|recent|show)\s+(\d+)\s+(?:gc|group|chat)?\s*(?:messages?|msgs?)(?:\s+in\s+(?:this\s+)?(?:gc|group))?/i);
+	if (
+		countHistoryMatch ||
+		/\b(?:what(?:\s+are|\s+is|\s+were|\s+was)?\s+(?:we|this\s+gc|the\s+gc|group|this\s+group|people|everyone)\s+(?:talking|chatting|discussing|saying|on\s+about)|gc\s+history|group\s+(?:chat\s+)?history|chat\s+history(?:\s+of\s+(?:this\s+gc|this\s+group|gc|group))?|what(?:\s+happened|\s+was\s+said)?\s+in\s+(?:this\s+)?(?:gc|group)|what(?:'s|\s+is)\s+happening\s+in\s+(?:this\s+)?(?:gc|group)|summarize\s+(?:this\s+)?(?:gc|group)|i\s+want\s+(?:the\s+)?chat\s+history)\b/i.test(lower)
+	) {
+		return {
+			type: "group_history_summary",
+			limit: countHistoryMatch ? Math.min(80, Math.max(5, parseInt(countHistoryMatch[1], 10))) : 50
+		};
+	}
+
+	if (
+		/\b(?:who\s+are\s+(?:the\s+)?admins?(?:\s+in\s+(?:this\s+)?(?:gc|group))?|list\s+(?:gc|group)\s+admins?|how\s+many\s+members(?:\s+in\s+(?:this\s+)?(?:gc|group))?|(?:gc|group)\s+admins?|(?:this\s+)?(?:gc|group)\s+(?:info|details|summary|stats))\b/i.test(lower)
+	) {
+		return { type: "group_info_summary" };
+	}
+
 	const isBotIdentityQuery = /\bwho\s+(?:are\s+you|created\s+you|made\s+you|coded\s+you|owns\s+you|designed\s+you)\b/i.test(lower) ||
 		/\bwho\s+is\s+(?:your\s+creator|your\s+owner|your\s+boss|priyanshi)\b/i.test(lower);
 
@@ -1002,11 +1250,14 @@ function parseNaturalTaskIntent(prompt) {
 		(lower.includes("in this group") && /(?:who\s+is|details\s+of|who's)\s*(.*)$/i.test(p));
 
 	if (detailsMatch && !isBotIdentityQuery) {
-		const rawTarget = detailsMatch[1] || "";
-		return {
-			type: "user_details",
-			target: rawTarget.trim()
-		};
+		const rawTarget = (detailsMatch[1] || "").trim();
+		const isNonPersonTarget = /^(?:the\s+)?(?:admins?|moderators?|members?|this\s+group|this\s+gc|gc|group|chat\s+history|memory)\b/i.test(rawTarget);
+		if (!isNonPersonTarget) {
+			return {
+				type: "user_details",
+				target: rawTarget
+			};
+		}
 	}
 
 	const uidMatch = lower.match(/^(?:give\s+(?:me\s+)?(?:his|her|their|user|this|the)?\s*uid|what(?:'s|\s+is)\s+(?:his|her|their|user|the)?\s*uid|(?:get|find|fetch|show)\s+(?:his|her|their|the)?\s*uid|uid(?:\s+(?:of|for))?\s*(.+)?|whois(?:\s+(.+))?)$/i) ||
@@ -1122,6 +1373,27 @@ function parseNaturalTaskIntent(prompt) {
 					type: "run_workflow",
 					steps
 				};
+			}
+		}
+	}
+
+	const hasChainVerb = /^(?:use|run|trigger|execute|call|start|launch|invoke|check|show|get|play)\b/i.test(lower);
+	if (hasChainVerb && /\s+(?:and\s+then|then|also|and)\s+|,\s*/i.test(p)) {
+		const chainClauses = p
+			.replace(/^(?:please|can\s+you)\s+/i, "")
+			.split(/\s*(?:,\s*(?:and\s+)?|\s+(?:and\s+then|then|also|and)\s+)/i)
+			.map(c => c.trim())
+			.filter(Boolean);
+		if (chainClauses.length >= 2) {
+			const isMonitorTelemetryOnly = chainClauses.some(c => /^(?:monitor|measure|check|track|log|show|report|display)\s+(?:the\s+)?(?:response\s+time|latency|execution\s+time|speed|duration)\b/i.test(c));
+			if (!isMonitorTelemetryOnly) {
+				const chainSteps = chainClauses.map(c => extractCommandStepFromChainClause(c, true)).filter(Boolean);
+				if (chainSteps.length >= 2) {
+					return {
+						type: "run_workflow",
+						steps: chainSteps
+					};
+				}
 			}
 		}
 	}
@@ -1289,7 +1561,24 @@ async function handleScheduleManagement(subAction, scheduleId, threadID, message
 	}
 }
 
-async function deliverAgentMessage(message, api, thinkingMsg, text, attachments = [], authorID = "", threadID = "") {
+function attachReplyEntriesToMessage(msgId, authorID, pendingReplyEntries = []) {
+	if (!msgId || !(global.GoatBot?.onReply instanceof Map)) return;
+	if (Array.isArray(pendingReplyEntries) && pendingReplyEntries.length > 0) {
+		const latest = pendingReplyEntries[pendingReplyEntries.length - 1];
+		global.GoatBot.onReply.set(msgId, {
+			...latest,
+			messageID: msgId
+		});
+		return;
+	}
+	global.GoatBot.onReply.set(msgId, {
+		commandName: "ai",
+		messageID: msgId,
+		author: String(authorID)
+	});
+}
+
+async function deliverAgentMessage(message, api, thinkingMsg, text, attachments = [], authorID = "", threadID = "", pendingReplyEntries = []) {
 	const formattedText = sanitizeAndFormatOutput(text);
 	const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
 
@@ -1314,27 +1603,20 @@ async function deliverAgentMessage(message, api, thinkingMsg, text, attachments 
 		const msgId = sent?.messageID || null;
 		if (msgId) {
 			recordAiMessageId(msgId, authorID, threadID);
-			if (global.GoatBot?.onReply instanceof Map) {
-				global.GoatBot.onReply.set(msgId, { commandName: "ai", messageID: msgId, author: String(authorID) });
-			}
+			attachReplyEntriesToMessage(msgId, authorID, pendingReplyEntries);
 		}
 		return msgId;
 	}
 
 	if (thinkingMsg?.messageID) {
 		recordAiMessageId(thinkingMsg.messageID, authorID, threadID);
-		if (global.GoatBot?.onReply instanceof Map) {
-			global.GoatBot.onReply.set(thinkingMsg.messageID, {
-				commandName: "ai",
-				messageID: thinkingMsg.messageID,
-				author: String(authorID)
-			});
-		}
+		attachReplyEntriesToMessage(thinkingMsg.messageID, authorID, pendingReplyEntries);
 		try {
 			if (message && typeof message.edit === "function") {
 				const edited = await message.edit(formattedText, thinkingMsg.messageID);
 				const finalId = edited?.messageID || thinkingMsg.messageID;
 				recordAiMessageId(finalId, authorID, threadID);
+				attachReplyEntriesToMessage(finalId, authorID, pendingReplyEntries);
 				return finalId;
 			}
 			if (api && typeof api.editMessage === "function") {
@@ -1351,13 +1633,163 @@ async function deliverAgentMessage(message, api, thinkingMsg, text, attachments 
 		const finalId = sent?.messageID || thinkingMsg?.messageID || null;
 		if (finalId) {
 			recordAiMessageId(finalId, authorID, threadID);
-			if (global.GoatBot?.onReply instanceof Map) {
-				global.GoatBot.onReply.set(finalId, { commandName: "ai", messageID: finalId, author: String(authorID) });
-			}
+			attachReplyEntriesToMessage(finalId, authorID, pendingReplyEntries);
 		}
 		return finalId;
 	}
 	return null;
+}
+
+async function runCapturedSynthesizedCommand({
+	commandName,
+	args = [],
+	execContext,
+	userPrompt = "",
+	honorific = "Friend",
+	uid = "",
+	prefix = ".",
+	thinkingMsg = null,
+	message,
+	api,
+	threadID,
+	monitorResponseTime = false,
+	modifyInstruction = "",
+	gcName = "",
+	isGroup = false,
+	recordHistory = true
+}) {
+	const startPerf = performance.now();
+	const toolResult = await toolRegistry.executeCommandAsTool({
+		commandName,
+		args,
+		...execContext,
+		captureOutput: true
+	});
+	const elapsedMs = Math.round(performance.now() - startPerf);
+
+	const finalText = await synthesizeToolExecutionResult({
+		toolResult,
+		userPrompt,
+		honorific,
+		uid,
+		prefix,
+		modifyInstruction,
+		elapsedMs,
+		monitorResponseTime
+	});
+
+	await deliverAgentMessage(
+		message,
+		api,
+		thinkingMsg,
+		finalText || `✅ Executed ${prefix}${toolResult.commandName} for you, ${honorific}.`,
+		toolResult.attachments || [],
+		uid,
+		threadID,
+		toolResult.virtualReplyEntries || []
+	);
+
+	if (recordHistory) {
+		appendChatHistoryTurn({
+			threadID,
+			uid,
+			name: honorific,
+			gcName,
+			userPrompt,
+			assistantReply: finalText || `[Executed ${toolResult.commandName}]`,
+			isGroup
+		});
+	}
+	return toolResult;
+}
+
+async function resolveGroupHistoryReply({ threadID, memberQuery = "", limit = 50, honorific = "Friend", uid = "", userPrompt = "" }) {
+	if (!groupMemory) {
+		return `Group memory is not loaded right now, ${honorific}.`;
+	}
+	const gcMeta = groupMemory.getGroupMeta(threadID);
+	const gcName = gcMeta?.gcName || gcMeta?.threadName || "this group";
+
+	if (memberQuery) {
+		const memberMem = groupMemory.getMemberMemory(threadID, memberQuery);
+		const matchedMsgs = memberMem?.recentMessages?.length
+			? memberMem.recentMessages.map(m => `${m.name}: ${m.body}`).join("\n")
+			: groupMemory.searchGroupMemory(threadID, memberQuery, 20).map(m => `${m.name}: ${m.body}`).join("\n");
+		if (!matchedMsgs) {
+			return `No stored messages found for "${memberQuery}" in ${gcName} (TID: ${threadID}) yet, ${honorific}.`;
+		}
+		const memberPrompt =
+			`[MEMBER ACTIVITY IN GROUP MEMORY]\n` +
+			`Group: ${gcName} (TID: ${threadID})\n` +
+			`Target: ${memberMem?.name || memberQuery} (UID: ${memberMem?.uid || "unknown"}, Messages: ${memberMem?.msgCount || "N/A"})\n` +
+			`Topics: ${(memberMem?.keywords || []).join(", ") || "general"}\n` +
+			`Recent Messages:\n${matchedMsgs.slice(0, 1800)}\n\n` +
+			`Answer what ${memberMem?.name || memberQuery} talked about concisely as Queen Bot addressing ${honorific}.`;
+		const res = await callMeowGeminiApi({ prompt: memberPrompt, uid: `memsum_${uid}`, model: "gemini-flash" });
+		return res.ok && res.response
+			? sanitizeAndFormatOutput(res.response)
+			: `📝 ${memberMem?.name || memberQuery} (${gcName}):\n${matchedMsgs.slice(0, 500)}`;
+	}
+
+	const rawCtx = groupMemory.getGroupContextFormatted(threadID, limit || 50);
+	if (!rawCtx) {
+		return `No group chat history stored yet for this chat (TID: ${threadID}), ${honorific}.`;
+	}
+
+	const summaryPrompt =
+		`[GROUP CHAT HISTORY MEMORY (JSON+ZSTD)]\n` +
+		`Group Name: ${gcName} | TID: ${threadID}\n` +
+		(userPrompt ? `User Question: "${userPrompt}"\n` : "") +
+		`Active Topics: ${(gcMeta?.topics || []).slice(-12).join(", ") || "general chat"}\n` +
+		`Recent Group Messages:\n${rawCtx.slice(0, 2400)}\n\n` +
+		`Summarize what the group has been talking about based cleanly on the logged messages above. Keep it short, accurate, and natural as Queen Bot addressing ${honorific}.`;
+	const summaryRes = await callMeowGeminiApi({
+		prompt: summaryPrompt,
+		uid: `gcsum_${uid}`,
+		model: "gemini-flash"
+	});
+	if (summaryRes.ok && summaryRes.response) {
+		return sanitizeAndFormatOutput(summaryRes.response);
+	}
+	const fallbackLines = rawCtx.split("\n").slice(-10).join("\n");
+	return `💬 Recent chat in ${gcName} (TID: ${threadID}):\n${fallbackLines}`;
+}
+
+async function resolveGroupInfoReply({ threadID, api, threadsData, honorific = "Friend", uid = "", userPrompt = "" }) {
+	let threadData = null;
+	if (threadsData && typeof threadsData.get === "function") {
+		try { threadData = await threadsData.get(threadID); } catch {}
+	}
+	let liveInfo = null;
+	if (api && typeof api.getThreadInfo === "function") {
+		try { liveInfo = await api.getThreadInfo(threadID); } catch {}
+	}
+	const gcMeta = groupMemory ? groupMemory.getGroupMeta(threadID) : null;
+	const gcName = liveInfo?.threadName || threadData?.threadName || gcMeta?.gcName || "This Group";
+	const members = Array.isArray(liveInfo?.userInfo) ? liveInfo.userInfo : (Array.isArray(threadData?.members) ? threadData.members : []);
+	const adminIDsRaw = Array.isArray(liveInfo?.adminIDs) ? liveInfo.adminIDs : (Array.isArray(threadData?.adminIDs) ? threadData.adminIDs : []);
+	const adminUids = adminIDsRaw.map(a => String(a?.id || a?.userID || a));
+	const adminNames = adminUids.map(aUid => {
+		const m = members.find(x => String(x.id || x.userID) === aUid);
+		return m?.name ? `${m.name} (${aUid})` : aUid;
+	});
+	const memberCount = liveInfo?.participantIDs?.length || members.length || gcMeta?.userCount || 0;
+	const msgCount = liveInfo?.messageCount || gcMeta?.msgCount || 0;
+
+	const factSummary =
+		`Group Name: ${gcName}\n` +
+		`TID: ${threadID}\n` +
+		`Members: ${memberCount}\n` +
+		`Admins (${adminUids.length}): ${adminNames.join(", ") || "None"}\n` +
+		`Messages Recorded: ${msgCount}\n` +
+		(gcMeta?.topics?.length ? `Active Topics: ${gcMeta.topics.slice(-10).join(", ")}` : "");
+
+	const aiRes = await callMeowGeminiApi({
+		prompt: `[GROUP INFO DATA]\n${factSummary}\n\n[USER QUESTION]: "${userPrompt}"\nRespond cleanly and concisely as Queen Bot addressing ${honorific}.`,
+		uid: `ginfo_${uid}`,
+		model: "gemini-flash"
+	});
+	return aiRes.ok && aiRes.response ? sanitizeAndFormatOutput(aiRes.response) : `📌 ${factSummary}`;
 }
 
 async function executeParsedQueenActions(actions, context, userIdentity, thinkingMsg) {
@@ -1381,6 +1813,7 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 	const threadID = String(event?.threadID || uid);
 	const effectiveRole = userIdentity?.isOwner ? 2 : (Number(role) || 0);
 	const honorific = userIdentity?.isOwner ? "My Queen" : (userIdentity?.name || "Friend");
+	const userPrompt = String(context?.prompt || "");
 
 	const execContext = {
 		api,
@@ -1398,6 +1831,38 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 		globalData
 	};
 
+	const runToolActions = actions.filter(a => String(a?.action || "").toLowerCase() === "run_tool");
+	if (runToolActions.length > 1 && runToolActions.length === actions.length) {
+		const stepEntries = [];
+		for (const actObj of runToolActions) {
+			const cmdArgs = Array.isArray(actObj.args) ? actObj.args : [];
+			const t0 = performance.now();
+			const res = await toolRegistry.executeCommandAsTool({
+				commandName: actObj.command,
+				args: cmdArgs,
+				...execContext,
+				captureOutput: true
+			});
+			stepEntries.push({
+				label: actObj.command,
+				elapsedMs: Math.round(performance.now() - t0),
+				result: res
+			});
+		}
+		const combined = await synthesizeMultiToolResults({ stepEntries, userPrompt, honorific, uid });
+		await deliverAgentMessage(
+			message,
+			api,
+			thinkingMsg,
+			combined.text || `✅ Executed ${runToolActions.length} commands for you, ${honorific}.`,
+			combined.attachments,
+			uid,
+			threadID,
+			combined.virtualReplyEntries
+		);
+		return;
+	}
+
 	for (const actObj of actions) {
 		const actionType = String(actObj.action || "").toLowerCase();
 
@@ -1406,57 +1871,21 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 			const cmdArgs = Array.isArray(actObj.args) ? actObj.args : [];
 			const modifyInstruction = String(actObj.modifyResponse || "").trim();
 
-			const toolResult = await toolRegistry.executeCommandAsTool({
+			await runCapturedSynthesizedCommand({
 				commandName: cmdName,
 				args: cmdArgs,
-				...execContext,
-				captureOutput: true
-			});
-
-			if (!toolResult.ok) {
-				const githubHelp = toolResult.githubSolution
-					? `\n\n💡 Suggested Solution (${toolResult.githubSolution.githubRef}):\n• ${toolResult.githubSolution.fix}\n• Ref: ${toolResult.githubSolution.repo}`
-					: "";
-				await deliverAgentMessage(
-					message,
-					api,
-					thinkingMsg,
-					`⚠️ ${honorific}, I could not run "${cmdName}": ${toolResult.error}${githubHelp}`,
-					[],
-					uid,
-					threadID
-				);
-				continue;
-			}
-
-			let finalBody = toolResult.capturedText;
-			if (modifyInstruction && finalBody) {
-				finalBody = await rewriteTextWithQueenAi( toolResult.commandName, finalBody, modifyInstruction, uid );
-			}
-			else if (finalBody && !toolResult.attachments?.length) {
-				const synthPrompt =
-					`[TOOL EXECUTION RESULT FOR ${honorific.toUpperCase()}]\n` +
-					`Tool "${toolResult.commandName}" returned:\n${finalBody}\n\n` +
-					`Present this result naturally as Queen Bot addressing ${honorific}. Keep all metrics, numbers, and links accurate.`;
-				const synthRes = await callMeowGeminiApi({
-					prompt: synthPrompt,
-					uid: `synth_${uid}`,
-					model: "gemini-flash"
-				});
-				if (synthRes.ok && synthRes.response) {
-					finalBody = synthRes.response;
-				}
-			}
-
-			await deliverAgentMessage(
+				execContext,
+				userPrompt,
+				honorific,
+				uid,
+				prefix,
+				thinkingMsg,
 				message,
 				api,
-				thinkingMsg,
-				finalBody || `✅ Executed ${prefix}${toolResult.commandName} for you, ${honorific}.`,
-				toolResult.attachments || [],
-				uid,
-				threadID
-			);
+				threadID,
+				modifyInstruction,
+				recordHistory: false
+			});
 		}
 		else if (actionType === "schedule_once" || actionType === "delay_task") {
 			const delaySeconds = Number(actObj.delaySeconds || actObj.intervalSeconds || 60);
@@ -1516,10 +1945,48 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 		}
 		else if (actionType === "run_workflow") {
 			const rawSteps = Array.isArray(actObj.steps) ? actObj.steps : [];
-			if (thinkingMsg?.messageID && message?.unsend) {
-				try { await message.unsend(thinkingMsg.messageID); } catch {}
+			const stepEntries = [];
+			for (const step of rawSteps) {
+				if (!step || !step.command) continue;
+				const delaySec = Number(step.delaySecondsBefore || 0);
+				if (delaySec > 0) {
+					await sleep(Math.min(delaySec, 3600) * 1000);
+				}
+				let finalArgs = Array.isArray(step.args) ? [...step.args] : [];
+				if (step.fuzzySearch && finalArgs.length > 0) {
+					const flagArgs = finalArgs.filter(a => String(a).startsWith("-"));
+					const queryPart = finalArgs.filter(a => !String(a).startsWith("-")).join(" ");
+					if (queryPart) {
+						const resolved = await toolRegistry.resolveFuzzyQueryWithWeb(queryPart, "media");
+						if (resolved?.resolvedQuery) {
+							finalArgs = [...flagArgs, ...resolved.resolvedQuery.split(/\s+/)];
+						}
+					}
+				}
+				const t0 = performance.now();
+				const res = await toolRegistry.executeCommandAsTool({
+					commandName: step.command,
+					args: finalArgs,
+					...execContext,
+					captureOutput: true
+				});
+				stepEntries.push({
+					label: step.command,
+					elapsedMs: Math.round(performance.now() - t0),
+					result: res
+				});
 			}
-			await executeScheduledSteps(rawSteps, execContext);
+			const combined = await synthesizeMultiToolResults({ stepEntries, userPrompt, honorific, uid });
+			await deliverAgentMessage(
+				message,
+				api,
+				thinkingMsg,
+				combined.text || `✅ Completed ${stepEntries.length} workflow step(s), ${honorific}.`,
+				combined.attachments,
+				uid,
+				threadID,
+				combined.virtualReplyEntries
+			);
 		}
 		else if (actionType === "schedule_workflow") {
 			const intervalSeconds = Number(actObj.intervalSeconds || 86400);
@@ -1612,15 +2079,19 @@ async function executeParsedQueenActions(actions, context, userIdentity, thinkin
 			const searchRes = await toolRegistry.resolveFuzzyQueryWithWeb(actObj.query, actObj.thenRunCommand ? "media" : "general");
 			if (actObj.thenRunCommand && searchRes.resolvedQuery) {
 				const prefixArgs = Array.isArray(actObj.thenArgsPrefix) ? actObj.thenArgsPrefix : [];
-				const toolRes = await toolRegistry.executeCommandAsTool({
+				await runCapturedSynthesizedCommand({
 					commandName: actObj.thenRunCommand,
 					args: [...prefixArgs, ...searchRes.resolvedQuery.split(/\s+/)],
-					...execContext,
-					captureOutput: false
+					execContext,
+					userPrompt,
+					honorific,
+					uid,
+					prefix,
+					thinkingMsg,
+					message,
+					api,
+					threadID
 				});
-				if (thinkingMsg?.messageID && message?.unsend && toolRes.ok) {
-					try { await message.unsend(thinkingMsg.messageID); } catch {}
-				}
 			}
 			else {
 				const ans = await callMeowGeminiApi({
@@ -1795,6 +2266,19 @@ async function handleQueenAgentTurn(options) {
 	const threadID = String(event?.threadID || uid);
 	const rawPrompt = String(prompt || "").trim();
 	const lower = rawPrompt.toLowerCase();
+	const isGroup = Boolean(event?.isGroup || (threadID && uid && threadID !== uid));
+	let currentGcName = "";
+	if (isGroup && threadsData && typeof threadsData.get === "function") {
+		try {
+			const td = await threadsData.get(threadID);
+			if (td?.threadName) currentGcName = String(td.threadName);
+		}
+		catch {}
+	}
+	if (!currentGcName && groupMemory) {
+		const gm = groupMemory.getGroupMeta(threadID);
+		if (gm?.gcName) currentGcName = gm.gcName;
+	}
 
 	const userIdentity = await toolRegistry.resolveUserIdentity({
 		api,
@@ -1876,6 +2360,49 @@ async function handleQueenAgentTurn(options) {
 
 	const naturalTask = parseNaturalTaskIntent(rawPrompt);
 	if (naturalTask) {
+		if (naturalTask.type === "group_memory_control") {
+			if (naturalTask.action === "clear") {
+				if (effectiveRole < 1 && !userIdentity.isOwner) {
+					return await deliverAgentMessage(message, api, null, `⚠️ Only Admin or Owner can clear group memory.`, [], uid, threadID);
+				}
+				const cleared = groupMemory ? groupMemory.clearGroupMemory(threadID) : false;
+				return await deliverAgentMessage(
+					message,
+					api,
+					null,
+					cleared ? `🗑️ Cleared JSON+ZSTD group memory for this chat, ${honorific}.` : `⚠️ No group memory found to clear.`,
+					[],
+					uid,
+					threadID
+				);
+			}
+			const meta = groupMemory ? groupMemory.getGroupMeta(threadID) : null;
+			const allGroups = groupMemory ? groupMemory.listKnownGroups() : [];
+			const sizeKb = meta ? (meta.fileSizeBytes / 1024).toFixed(2) : "0";
+			const maxKb = meta ? (meta.maxBytes / 1024).toFixed(0) : "1024";
+			const statusText =
+				`🧠 Group ZSTD Memory Status\n────────────\n` +
+				`• GC Name: ${meta?.gcName || currentGcName || "This Chat"}\n` +
+				`• TID: ${threadID}\n` +
+				`• Stored Messages: ${meta?.msgCount || 0}\n` +
+				`• Tracked Members: ${meta?.userCount || 0}\n` +
+				`• Storage Used: ${sizeKb} KB / ${maxKb} KB (1 MB max)\n` +
+				`• Active Topics: ${meta?.topics?.slice(-8).join(", ") || "None yet"}\n` +
+				`• Known Groups Saved: ${allGroups.length}`;
+			return await deliverAgentMessage(message, api, null, statusText, [], uid, threadID);
+		}
+		if (naturalTask.type === "group_info_summary") {
+			const gInfoReply = await resolveGroupInfoReply({
+				threadID,
+				api,
+				threadsData,
+				honorific,
+				uid,
+				userPrompt: rawPrompt
+			});
+			appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", gcName: currentGcName, userPrompt: rawPrompt, assistantReply: gInfoReply, isGroup });
+			return await deliverAgentMessage(message, api, null, gInfoReply, [], uid, threadID);
+		}
 		if (naturalTask.type === "user_details") {
 			const targetInput = naturalTask.target || rawPrompt;
 			const card = await toolRegistry.getUserDetailsCard({
@@ -1886,8 +2413,17 @@ async function handleQueenAgentTurn(options) {
 				usersData
 			});
 			if (card && card.ok && card.body) {
+				let enrichedBody = card.body;
+				if (groupMemory) {
+					const memInfo = groupMemory.getMemberMemory(threadID, card.uid || targetInput);
+					if (memInfo && memInfo.msgCount > 0) {
+						const topicStr = memInfo.keywords?.length ? memInfo.keywords.slice(-5).join(", ") : "general";
+						enrichedBody += `\n• Memory Activity: ${memInfo.msgCount} msg(s) tracked (Topics: ${topicStr})`;
+					}
+				}
 				const attachments = card.attachment ? [card.attachment] : [];
-				return await deliverAgentMessage(message, api, null, card.body, attachments, uid, threadID);
+				appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", gcName: currentGcName, userPrompt: rawPrompt, assistantReply: enrichedBody, isGroup });
+				return await deliverAgentMessage(message, api, null, enrichedBody, attachments, uid, threadID);
 			}
 			return await deliverAgentMessage(message, api, null, `⚠️ Could not find details for that user.`, [], uid, threadID);
 		}
@@ -1898,6 +2434,18 @@ async function handleQueenAgentTurn(options) {
 				return await deliverAgentMessage(message, api, null, `🆔 UID: ${uidRes.uid} (${uidRes.name})`, [], uid, threadID);
 			}
 			return await deliverAgentMessage(message, api, null, `⚠️ Could not find UID for that user.`, [], uid, threadID);
+		}
+		if (naturalTask.type === "group_history_summary") {
+			const gcReply = await resolveGroupHistoryReply({
+				threadID,
+				memberQuery: naturalTask.memberQuery || "",
+				limit: naturalTask.limit || 50,
+				honorific,
+				uid,
+				userPrompt: rawPrompt
+			});
+			appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", gcName: currentGcName, userPrompt: rawPrompt, assistantReply: gcReply, isGroup });
+			return await deliverAgentMessage(message, api, null, gcReply, [], uid, threadID);
 		}
 		if (naturalTask.type === "uptime_and_time") {
 			const uptimeSec = Math.floor(process.uptime());
@@ -1964,26 +2512,22 @@ async function handleQueenAgentTurn(options) {
 			}
 		}
 		if (naturalTask.type === "immediate_tool") {
-			const startPerf = performance.now();
-			const toolResult = await toolRegistry.executeCommandAsTool({
+			await runCapturedSynthesizedCommand({
 				commandName: naturalTask.command,
 				args: naturalTask.args,
-				...execContext,
-				captureOutput: false
+				execContext,
+				userPrompt: rawPrompt,
+				honorific,
+				uid,
+				prefix,
+				thinkingMsg: null,
+				message,
+				api,
+				threadID,
+				monitorResponseTime: Boolean(naturalTask.monitorResponseTime),
+				gcName: currentGcName,
+				isGroup
 			});
-			const elapsedMs = Math.round(performance.now() - startPerf);
-
-			if (naturalTask.monitorResponseTime) {
-				const songDesc = naturalTask.chosenSong ? ` ("${naturalTask.chosenSong}")` : (naturalTask.args.length ? ` ${naturalTask.args.join(" ")}` : "");
-				const telemetryMsg =
-					`⚡ Queen Bot • Execution Telemetry\n` +
-					`────────────\n` +
-					`• Command: ${prefix}${naturalTask.command}${songDesc}\n` +
-					`• Response Time: ${elapsedMs} ms\n` +
-					`• Status: ${toolResult.ok ? "🟢 Completed Successfully" : "⚠️ Error: " + toolResult.error}\n` +
-					`• Runtime Engine: ${process.versions.bun ? "Bun v" + process.versions.bun : "Node.js " + process.version}`;
-				await message.reply(telemetryMsg);
-			}
 			return;
 		}
 		if (naturalTask.type === "manage_schedules") {
@@ -2056,8 +2600,7 @@ async function handleQueenAgentTurn(options) {
 	}
 
 	const systemInstruction = buildDynamicSystemPrompt(userIdentity);
-	const isGroup = Boolean(event?.isGroup);
-	const recentHistory = getRecentHistoryContext({ threadID, uid, isGroup }, 700);
+	const recentHistory = getRecentHistoryContext({ threadID, uid, isGroup }, 1100);
 	const replyContext = event?.messageReply?.body
 		? `\n[Replied Message: "${String(event.messageReply.body).slice(0, 500)}"]`
 		: "";
@@ -2072,14 +2615,15 @@ async function handleQueenAgentTurn(options) {
 		`[QUEENBOT AI AGENTIC CORE]\n` +
 		`You are Queen Bot, an autonomous AI assistant powering QueenBotV3 on Facebook Messenger.\n` +
 		`CRITICAL: Give short, simple, direct answers with no extra details unless asked.\n` +
-		`When asked to run, trigger, or use a bot tool or command, always output <QUEEN_ACTION>{"action":"run_tool","command":"<command>","args":[...]}</QUEEN_ACTION>.\n` +
-		`Never state that you cannot execute commands, interact with messaging APIs, or monitor response times.`;
+		`When asked to run, check, or trigger ANY bot command, ALWAYS emit <QUEEN_ACTION>{"action":"run_tool","command":"<command>","args":[...]}</QUEEN_ACTION> (or multiple run_tool / run_workflow actions for chained tasks).\n` +
+		`When asked about group chat history, topics, or members, answer using the Group ZSTD Memory Context provided below.\n` +
+		`Never state that you cannot execute commands, access group logs, inspect member details, interact with messaging APIs, or monitor response times.`;
 
 	const compositePrompt = [
 		systemBanner,
 		extractedImage ? `[Attached Image URL: ${extractedImage}]\n[Image Task]: Describe what is in this image. Keep response short and simple with no extra details.` : "",
-		recentHistory ? `[Recent Chat Context]:\n${recentHistory}\n` : "",
-		`[User (${honorific}, UID: ${uid})]: ${promptToUse}${replyContext}`
+		recentHistory ? `[Recent Chat & Group ZSTD Memory Context]:\n${recentHistory}\n` : "",
+		`[User (${honorific}, UID: ${uid}${currentGcName ? `, GC: ${currentGcName}` : ""})]: ${promptToUse}${replyContext}`
 	]
 		.filter(Boolean)
 		.join("\n");
@@ -2094,6 +2638,15 @@ async function handleQueenAgentTurn(options) {
 	});
 
 	if (!apiRes.ok) {
+		if (/(?:gc|group|chat|history|talking|discussing|admins?|members?)/i.test(rawPrompt) && isGroup) {
+			const offlineGcReply = await resolveGroupHistoryReply({
+				threadID,
+				honorific,
+				uid,
+				userPrompt: rawPrompt
+			});
+			return await deliverAgentMessage(message, api, thinking, offlineGcReply, [], uid, threadID);
+		}
 		return await deliverAgentMessage(
 			message,
 			api,
@@ -2110,21 +2663,30 @@ async function handleQueenAgentTurn(options) {
 
 	if (parsedActions.length > 0) {
 		await executeParsedQueenActions(parsedActions, options, userIdentity, thinking);
-		appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", userPrompt: rawPrompt, assistantReply: `[Executed Actions: ${parsedActions.map(a => a.action).join(", ")}]`, isGroup });
+		appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", gcName: currentGcName, userPrompt: rawPrompt, assistantReply: `[Executed Actions: ${parsedActions.map(a => a.action).join(", ")}]`, isGroup });
 		return;
 	}
 
 	const isCapabilityRefusal =
-		/(?:cannot|can't)\s+(?:execute|run|trigger|interact)\s+(?:custom\s+)?(?:bot\s+)?commands/i.test(rawResponse) ||
+		/(?:cannot|can't|do not have|don't have)\s+(?:execute|run|trigger|interact|access|live\s+access)/i.test(rawResponse) ||
 		/interact with external messaging APIs/i.test(rawResponse) ||
 		/monitor live system response times/i.test(rawResponse) ||
 		/access to live Facebook/i.test(rawResponse) ||
 		/retrieve a user's Facebook UID/i.test(rawResponse) ||
+		/chat\s+logs|message\s+histor/i.test(rawResponse) ||
 		/don't have access to your group's chat history or member details/i.test(rawResponse) ||
 		/don't have access to live Messenger group member profiles/i.test(rawResponse) ||
-		/access to.*(?:member|profile|account details|chat history)/i.test(rawResponse);
+		/access to.*(?:member|profile|account details|chat history|group)/i.test(rawResponse);
 
 	if (isCapabilityRefusal) {
+		if (/(?:chat\s+history|gc\s+history|talking\s+about|discussing|happened\s+in\s+gc|message\s+history)/i.test(rawPrompt)) {
+			const gcReply = await resolveGroupHistoryReply({ threadID, honorific, uid, userPrompt: rawPrompt });
+			return await deliverAgentMessage(message, api, thinking, gcReply, [], uid, threadID);
+		}
+		if (/(?:admins?|how\s+many\s+members|group\s+info|gc\s+info)/i.test(rawPrompt)) {
+			const gInfoReply = await resolveGroupInfoReply({ threadID, api, threadsData, honorific, uid, userPrompt: rawPrompt });
+			return await deliverAgentMessage(message, api, thinking, gInfoReply, [], uid, threadID);
+		}
 		if (/(?:details|profile|info|who\s+is|who's|who\s+are)/i.test(rawPrompt)) {
 			const card = await toolRegistry.getUserDetailsCard({
 				query: rawPrompt,
@@ -2144,32 +2706,24 @@ async function handleQueenAgentTurn(options) {
 				return await deliverAgentMessage(message, api, thinking, `🆔 UID: ${uidRes.uid} (${uidRes.name})`, [], uid, threadID);
 			}
 		}
-		const extracted = extractSingleClauseStep(rawPrompt);
+		const extracted = extractCommandStepFromChainClause(rawPrompt, true);
 		if (extracted && extracted.command) {
-			const startPerf = performance.now();
-			const toolResult = await toolRegistry.executeCommandAsTool({
+			await runCapturedSynthesizedCommand({
 				commandName: extracted.command,
 				args: extracted.args,
-				...execContext,
-				captureOutput: false
+				execContext,
+				userPrompt: rawPrompt,
+				honorific,
+				uid,
+				prefix,
+				thinkingMsg: thinking,
+				message,
+				api,
+				threadID,
+				monitorResponseTime: /response\s+time|latency/i.test(rawPrompt),
+				gcName: currentGcName,
+				isGroup
 			});
-			const elapsedMs = Math.round(performance.now() - startPerf);
-			if (thinking?.messageID) {
-				try {
-					if (message && typeof message.unsend === "function") {
-						await message.unsend(thinking.messageID);
-					}
-					else if (api && typeof api.unsendMessage === "function") {
-						await api.unsendMessage(thinking.messageID);
-					}
-				}
-				catch {}
-			}
-			if (/response\s+time|latency/i.test(rawPrompt)) {
-				await message.reply(
-					`⚡ Queen Bot • Execution Telemetry\n────────────\n• Command: ${prefix}${extracted.command}\n• Response Time: ${elapsedMs} ms\n• Status: ${toolResult.ok ? "🟢 Completed Successfully" : "⚠️ Error: " + toolResult.error}`
-				);
-			}
 			return;
 		}
 	}
@@ -2184,11 +2738,11 @@ async function handleQueenAgentTurn(options) {
 		uid,
 		threadID
 	);
-	appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", userPrompt: rawPrompt, assistantReply: cleanReply, isGroup });
+	appendChatHistoryTurn({ threadID, uid, name: userIdentity?.name || "Member", gcName: currentGcName, userPrompt: rawPrompt, assistantReply: cleanReply, isGroup });
 }
 
 const QueenAIGlobalBridge = {
-	version: "9.1.0",
+	version: "9.3.0",
 	author: "Priyanshi Kaur",
 	ownerUid: toolRegistry.OWNER_UID,
 	platform: "QueenBotV3",
@@ -2218,6 +2772,13 @@ const QueenAIGlobalBridge = {
 	cleanPersonQuery: toolRegistry.cleanPersonQuery,
 	appendChatHistoryTurn,
 	getRecentHistoryContext,
+	passiveGroupMemoryRecord,
+	groupMemoryGetContext: (threadID) => groupMemory ? groupMemory.getGroupContext(threadID, 60) : "",
+	groupMemoryGetMeta: (threadID) => groupMemory ? groupMemory.getGroupMeta(threadID) : null,
+	groupMemoryGetMember: (threadID, query) => groupMemory ? groupMemory.getMemberMemory(threadID, query) : null,
+	groupMemorySearch: (threadID, query, limit = 25) => groupMemory ? groupMemory.searchGroupMemory(threadID, query, limit) : [],
+	groupMemoryListGroups: () => groupMemory ? groupMemory.listKnownGroups() : [],
+	groupMemoryClear: (threadID) => groupMemory ? groupMemory.clearGroupMemory(threadID) : false,
 	deleteBotScript: toolRegistry.deleteBotScript,
 	handleReplyFallback: async (context) => {
 		const { event } = context || {};
