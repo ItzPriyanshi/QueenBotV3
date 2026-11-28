@@ -1,14 +1,16 @@
 const axios = require("axios");
-const yts = require("yt-search");
+
 const YOUTUBE_API = {
     BASE_URL: "https://meow-dl.onrender.com",
-    ENDPOINT: "/yt"
+    ENDPOINT: "/yt",
+    SEARCH_ENDPOINT: "/search"
 };
+
 module.exports = {
     config: {
         name: "sing",
         aliases: ["yt", "youtube", "ytsing"],
-        version: "5.0.0",
+        version: "5.1.0",
         author: "Priyanshi Kaur (Refactored)",
         role: 0,
         countDown: 5,
@@ -29,47 +31,65 @@ module.exports = {
         let mediaType = "audio";
         let selectedQuality = null;
         let queryArgs = [];
+
         for (const arg of inputArgs) {
             const lower = arg.toLowerCase();
             if (["audio", "mp3", "m4a", "-a"].includes(lower)) {
                 mediaType = "audio";
-            }
-            else if (["video", "mp4", "-v"].includes(lower)) {
+            } else if (["video", "mp4", "-v"].includes(lower)) {
                 mediaType = "video";
-            }
-            else if (/^(1080p|720p|480p|360p|240p|144p)$/.test(lower)) {
+            } else if (/^(1080p|720p|480p|360p|240p|144p)$/.test(lower)) {
                 selectedQuality = lower;
                 mediaType = "video";
-            }
-            else {
+            } else {
                 queryArgs.push(arg);
             }
         }
+
         const query = queryArgs.join(" ").trim();
         if (!query) {
-            return message.reply("❌ Enter a song name or YouTube URL.\n\n" +
+            return message.reply(
+                "❌ Enter a song name or YouTube URL.\n\n" +
                 "Examples:\n" +
                 "• sing let me love you\n" +
-                "• sing let me love you video 720p");
+                "• sing let me love you video 720p"
+            );
         }
+
         let processingMessage;
         try {
             setReaction(api, "🔍", event?.messageID);
-            processingMessage = await message.reply(isYouTubeURL(query) ? `⏳ Processing ${mediaType}...` : `🔎 Searching for "${query}"...`);
+            processingMessage = await message.reply(
+                isYouTubeURL(query) ? `⏳ Processing ${mediaType}...` : `🔎 Searching for "${query}"...`
+            );
+
             const video = await resolveVideo(query);
-            await editMessage(api, [
-                `⬇️ Extracting ${mediaType}...`,
-                `📀 ${video.title}`,
-                `🔗 ${video.shortUrl}`
-            ].join("\n"), processingMessage?.messageID);
+
+            await editMessage(
+                api,
+                [
+                    `⬇️ Extracting ${mediaType}...`,
+                    `📀 ${video.title}`,
+                    `🔗 ${video.shortUrl}`
+                ].join("\n"),
+                processingMessage?.messageID
+            );
+
             const mediaInfo = await fetchYouTubeMedia(video.url, mediaType, selectedQuality);
             const fileName = `${sanitizeFileName(mediaInfo.title)}.${mediaInfo.extension}`;
-            await editMessage(api, [
-                `📥 Downloading ${mediaType}...`,
-                `📀 ${mediaInfo.title}`,
-                `📦 Quality: ${mediaInfo.quality} | Size:${mediaInfo.size}`
-            ].join("\n"), processingMessage?.messageID);
+
+            await editMessage(
+                api,
+                [
+                    `📥 Downloading ${mediaType}...`,
+                    `📀 ${mediaInfo.title}`,
+                    `📦 Quality: ${mediaInfo.quality} | Size:${mediaInfo.size}`
+                ].join("\n"),
+                processingMessage?.messageID
+            );
+
             const attachment = await getMediaStream(mediaInfo.mediaURL, fileName);
+
             await message.reply({
                 body: [
                     mediaType === "audio" ? `🎶 ${mediaInfo.title}` : `🎬 ${mediaInfo.title}`,
@@ -79,10 +99,10 @@ module.exports = {
                 ].join("\n"),
                 attachment
             });
+
             await unsendMessage(api, processingMessage?.messageID);
             setReaction(api, "✅", event?.messageID);
-        }
-        catch (error) {
+        } catch (error) {
             console.error("Sing command error:", {
                 message: error?.message,
                 status: error?.response?.status,
@@ -97,17 +117,21 @@ module.exports = {
         }
     }
 };
+
 async function fetchYouTubeMedia(videoUrl, mediaType, requestedQuality) {
     const format = mediaType === "audio" ? "m4a" : "mp4";
     const requestUrl = `${YOUTUBE_API.BASE_URL}${YOUTUBE_API.ENDPOINT}?url=${encodeURIComponent(videoUrl)}&format=${format}`;
+
     try {
         const { data } = await axios.get(requestUrl);
         if (!data || (data.status !== "ok" && !data.success)) {
             throw new Error(data?.message || "The API could not process this video.");
         }
+
         if (mediaType === "audio") {
-            if (!data.downloadLink)
+            if (!data.downloadLink) {
                 throw new Error("No audio download link found.");
+            }
             return {
                 title: data.title || "YouTube Audio",
                 author: data.channel || "Unknown Channel",
@@ -116,13 +140,14 @@ async function fetchYouTubeMedia(videoUrl, mediaType, requestedQuality) {
                 quality: "Audio (m4a)",
                 size: data.size || "Unknown"
             };
-        }
-        else {
+        } else {
             const mediaList = data.media;
             if (!mediaList || !Array.isArray(mediaList) || mediaList.length === 0) {
                 throw new Error("No video qualities found for this URL.");
             }
-            let selectedMedia = requestedQuality ? mediaList.find((m) => m.quality === requestedQuality) : mediaList.find((m) => m.quality === "720p");
+            let selectedMedia = requestedQuality
+                ? mediaList.find((m) => m.quality === requestedQuality)
+                : mediaList.find((m) => m.quality === "720p");
             if (!selectedMedia) {
                 selectedMedia = mediaList[0];
             }
@@ -135,11 +160,11 @@ async function fetchYouTubeMedia(videoUrl, mediaType, requestedQuality) {
                 size: selectedMedia.size || "Unknown"
             };
         }
-    }
-    catch (error) {
+    } catch (error) {
         throw new Error(error.response?.data?.message || error.message || "Failed to fetch media links.");
     }
 }
+
 async function resolveVideo(query) {
     const directVideoID = extractYouTubeID(query);
     if (directVideoID) {
@@ -147,34 +172,43 @@ async function resolveVideo(query) {
             videoID: directVideoID,
             url: `https://www.youtube.com/watch?v=${directVideoID}`,
             shortUrl: `https://youtu.be/${directVideoID}`,
-            title: "YouTube Video",
+            title: "YouTube Video"
         };
     }
+
     if (/^https?:\/\//i.test(query)) {
         throw new Error("Only valid YouTube URLs are supported.");
     }
-    const searchResult = await yts(query);
-    const video = searchResult?.videos?.[0];
-    if (!video) {
+
+    const searchUrl = `${YOUTUBE_API.BASE_URL}${YOUTUBE_API.SEARCH_ENDPOINT}?q=${encodeURIComponent(query)}&num=10`;
+    const { data } = await axios.get(searchUrl);
+
+    if (!data?.success || !Array.isArray(data.results) || data.results.length === 0) {
         throw new Error(`No YouTube videos were found for "${query}".`);
     }
+
+    const video = data.results[0];
+    if (!video || !video.videoId) {
+        throw new Error(`No YouTube videos were found for "${query}".`);
+    }
+
     return {
         videoID: video.videoId,
-        url: video.url,
+        url: `https://www.youtube.com/watch?v=${video.videoId}`,
         shortUrl: `https://youtu.be/${video.videoId}`,
         title: video.title || "YouTube Video",
-        author: video.author?.name || "Unknown Channel"
+        author: video.author || "Unknown Channel"
     };
 }
+
 function isYouTubeURL(value) {
     return Boolean(extractYouTubeID(value));
 }
+
 function extractYouTubeID(value) {
-    if (typeof value !== "string")
-        return null;
+    if (typeof value !== "string") return null;
     const input = value.trim();
-    if (/^[a-zA-Z0-9_-]{11}$/.test(input))
-        return input;
+    if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
     try {
         const parsed = new URL(input);
         const hostname = parsed.hostname.replace(/^www\./, "").toLowerCase();
@@ -184,20 +218,20 @@ function extractYouTubeID(value) {
         }
         if (["youtube.com", "m.youtube.com", "music.youtube.com"].includes(hostname)) {
             const queryID = parsed.searchParams.get("v");
-            if (isValidVideoID(queryID))
-                return queryID;
+            if (isValidVideoID(queryID)) return queryID;
             const parts = parsed.pathname.split("/").filter(Boolean);
             if (["shorts", "embed", "live"].includes(parts[0]) && isValidVideoID(parts[1])) {
                 return parts[1];
             }
         }
-    }
-    catch { }
+    } catch {}
     return null;
 }
+
 function isValidVideoID(value) {
     return typeof value === "string" && /^[a-zA-Z0-9_-]{11}$/.test(value);
 }
+
 async function getMediaStream(mediaURL, fileName) {
     if (!global.utils || typeof global.utils.getStreamFromURL !== "function") {
         throw new Error("global.utils.getStreamFromURL is unavailable in your bot environment.");
@@ -208,6 +242,7 @@ async function getMediaStream(mediaURL, fileName) {
     }
     return stream;
 }
+
 function sanitizeFileName(value) {
     const fileName = String(value || "youtube_media")
         .replace(/[\\/:*?"<>|#%&{}$!'@+=`~]/g, "")
@@ -216,33 +251,31 @@ function sanitizeFileName(value) {
         .slice(0, 80);
     return fileName || "youtube_media";
 }
+
 async function editMessage(api, text, messageID) {
-    if (!messageID || typeof api?.editMessage !== "function")
-        return false;
+    if (!messageID || typeof api?.editMessage !== "function") return false;
     try {
         await api.editMessage(text, messageID);
         return true;
-    }
-    catch {
+    } catch {
         return false;
     }
 }
+
 async function unsendMessage(api, messageID) {
-    if (!messageID || typeof api?.unsendMessage !== "function")
-        return;
+    if (!messageID || typeof api?.unsendMessage !== "function") return;
     try {
         await api.unsendMessage(messageID);
-    }
-    catch { }
+    } catch {}
 }
+
 function setReaction(api, reaction, messageID) {
-    if (!messageID || typeof api?.setMessageReaction !== "function")
-        return;
+    if (!messageID || typeof api?.setMessageReaction !== "function") return;
     try {
-        api.setMessageReaction(reaction, messageID, () => { }, true);
-    }
-    catch { }
+        api.setMessageReaction(reaction, messageID, () => {}, true);
+    } catch {}
 }
+
 function formatError(error) {
     const errorMessage = error?.message || String(error) || "Unknown error";
     if (/timeout|timed out|econnaborted/i.test(errorMessage)) {
